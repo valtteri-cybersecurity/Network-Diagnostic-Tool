@@ -23,4 +23,6 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 
 COPY . .
 
+RUN python -m pip install --no-cache-dir -e .
+
 CMD ["bash"]
