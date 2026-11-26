@@ -18,7 +18,7 @@ SERVICE = "network_diagnostic.diagnostic_service"
 CLI = "network_diagnostic.cli"
 ENGINE_NAMES = [
     "models", "exceptions", "validation", "parsers", "command_runner", "network", "analysis",
-    "dns", "ping",
+    "dns", "ping", "snapshot_serialization",
 ]
 ENGINE_MODULES = [f"{CORE}.{name}" for name in ENGINE_NAMES]
 UI_MODULES = [CLI, f"{CLI}.main", f"{CLI}.output", "network_diagnostic.__main__", "PySide6"]
@@ -215,7 +215,7 @@ def test_parsers_are_pure_and_independent_of_commands_and_ui(subprocess_run, sys
 def test_service_layer_depends_only_on_engine_modules():
     imported = imported_modules(SERVICE)
 
-    assert imported <= set(ENGINE_MODULES) | {"typing"}
+    assert imported <= set(ENGINE_MODULES) | {"typing", "datetime", "re", "sys", "time", "uuid"}
     for forbidden in (
         CLI, f"{CLI}.main", f"{CLI}.output", "PySide6", "subprocess", "os", f"{CORE}.command_runner",
     ):
@@ -341,8 +341,16 @@ def test_service_layer_exposes_the_public_functions():
 def test_snapshot_models_are_data_only_and_independent_of_execution_and_ui():
     imported = imported_modules(f"{CORE}.models")
 
-    assert imported == {"dataclasses", "datetime", "enum", "math", "re", "typing", "uuid"}
-    assert not any(name.startswith("network_diagnostic") for name in imported)
+    # Reuse of the existing validators, without a cycle: neither imports models.
+    assert imported == {
+        "dataclasses", "datetime", "enum", "ipaddress", "math", "re", "typing", "uuid",
+        f"{CORE}.exceptions", f"{CORE}.validation",
+    }
+    assert {name for name in imported if name.startswith("network_diagnostic")} == {
+        f"{CORE}.exceptions", f"{CORE}.validation",
+    }
+    for validator in ("exceptions", "validation"):
+        assert f"{CORE}.models" not in imported_modules(f"{CORE}.{validator}")
     for forbidden in ("subprocess", "os", "socket", "http", "urllib", "ssl", "PySide6", CLI):
         assert forbidden not in imported
     tree = ast.parse(package_modules()[f"{CORE}.models"].read_text(encoding="utf-8"))
@@ -350,3 +358,72 @@ def test_snapshot_models_are_data_only_and_independent_of_execution_and_ui():
     attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     assert not {"print", "input", "exec", "eval", "open", "__import__"} & names
     assert not {"run", "Popen", "system", "check_output", "call", "connect"} & attributes
+
+
+SERIALIZATION = f"{CORE}.snapshot_serialization"
+
+
+def test_snapshot_serialization_imports_only_models_and_pure_standard_modules():
+    imported = imported_modules(SERIALIZATION)
+
+    assert imported == {"datetime", "enum", "math", f"{CORE}.models"}
+    for forbidden in ("json", "os", "pathlib", "subprocess", "logging", "socket", "PySide6", CLI, SERVICE):
+        assert forbidden not in imported
+    assert SERIALIZATION not in imported_modules(SERVICE)
+    assert SERIALIZATION not in imported_modules(f"{CORE}.models")
+
+
+@pytest.mark.parametrize("module", [SERIALIZATION, SERVICE])
+def test_snapshot_modules_have_no_file_writes_commands_or_remediation(module):
+    tree = ast.parse(package_modules()[module].read_text(encoding="utf-8"))
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+    assert not {"print", "input", "exec", "eval", "open", "__import__", "compile"} & names
+    assert not {"run", "Popen", "system", "check_output", "write", "write_text", "write_bytes", "run_command"} & attributes
+    assert not {"run_command", "subprocess", "os"} & names
+    commands = ("sudo", "systemctl", "nmcli", "ifconfig", "resolvectl", "iptables", "dhclient")
+    assert not [text for text in strings if text in commands or text.split(" ")[0] in commands]
+
+
+def test_service_pre_validation_does_not_drift_from_the_model_rules():
+    from network_diagnostic import diagnostic_service
+    from network_diagnostic.core import models
+
+    assert diagnostic_service.DEFAULT_PING_TARGETS == models._PING_TARGETS
+    assert diagnostic_service._ROUTING_FIELDS == models._ROUTING_FIELDS
+    assert diagnostic_service._MAX_TARGETS == 4
+
+    # The model keeps the DNS-target regex inline, so find it in the source.
+    tree = ast.parse(package_modules()[f"{CORE}.models"].read_text(encoding="utf-8"))
+    literals = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert diagnostic_service._HOST_STRUCTURE.pattern in literals
+
+
+@pytest.mark.parametrize("hostname", [
+    "example.com", "a", "a" * 254, "a" * 255, "", "-a", "a-", "a b", "a\n", "a/b", "exämple.com", "A.B-c.d",
+    "2001:db8::1", "::", "a_b", "a..b", "+a", "a%eth0", "1.2.3.4", "a:b-c.d",
+])
+def test_service_host_structure_matches_the_model_dns_target_rule(hostname):
+    from datetime import datetime, timezone
+    from network_diagnostic import diagnostic_service
+    from network_diagnostic.core.models import (
+        CollectionResult, CollectionStatus, DnsQueryResult, ExecutionStatus,
+    )
+
+    service_accepts = (
+        diagnostic_service._HOST_STRUCTURE.fullmatch(hostname) is not None and not hostname.startswith("-")
+    )
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    value = DnsQueryResult(hostname=hostname, execution_status=ExecutionStatus.COMPLETED)
+    try:
+        CollectionResult(
+            "dns.query", "system_resolver", hostname, CollectionStatus.COMPLETED, value,
+            started_at=moment, finished_at=moment, duration_seconds=0.0,
+        )
+        model_accepts = True
+    except ValueError:
+        model_accepts = False
+
+    assert service_accepts is model_accepts

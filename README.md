@@ -16,6 +16,8 @@ A Python command-line tool for basic network troubleshooting on Linux. It combin
 - Suggest common service names based on local port numbers.
 - Display the hostname, default-route interface, IPv4 address, gateway, and IPv4 routing table.
 - Display NetworkManager interface states and connection names.
+- Collect all observations into one structured `DiagnosticSnapshot` and export it as
+  JSON-compatible data (Python API, see [Diagnostic snapshot](#diagnostic-snapshot)).
 
 ## Requirements
 
@@ -134,13 +136,14 @@ tests/                      Tests and command-output fixtures
 | `core.ping` | UI-independent ping execution and analysis coordination |
 | `core.dns` | Hostname resolution, address lookups, and DNS measurements |
 | `core.analysis` | Socket filtering, service-name suggestions, and measurement classifications |
+| `core.snapshot_serialization` | Allowlist-based conversion of a `DiagnosticSnapshot` to JSON-compatible data |
 
 All imports are absolute package imports such as
 `from network_diagnostic.core.models import PingResult`. Module names below refer to
 these modules; `main.py` and `output.py` are in `cli/`, the engine modules in `core/`.
 
 The diagnostic engine (`network_diagnostic.core`) consists of `ping`, `dns`, `network`, `analysis`, `parsers`,
-`models`, `exceptions`, `validation`, and `command_runner`. It executes commands, parses their output,
+`models`, `exceptions`, `validation`, `command_runner`, and `snapshot_serialization`. It executes commands, parses their output,
 builds result models, and classifies measurements. It never prints, prompts,
 clears the screen, or imports `main` or `output`. Importing modules runs no commands.
 
@@ -158,7 +161,8 @@ use `parsers` and the runner; `analysis` uses models and `parsers.parse_port()`.
 `ping`, `dns`, `network`,
 `parsers`, and the runner use `validation`, which depends only on shared exceptions.
 `parsers` uses models, shared exceptions, and `validation` only. The runner uses
-models and shared exceptions.
+models and shared exceptions. `models` uses shared exceptions and `validation` to check snapshot values;
+`snapshot_serialization` uses only `models`.
 There are no engine-to-service, engine-to-CLI, or circular dependencies. A future GUI
 can call the same service functions and render the same results without CLI imports.
 
@@ -193,6 +197,7 @@ Importing the package or the service layer runs no commands and does not load th
 | `get_listening_ports()` | `ListeningPortReport(sockets, counts, services)` from one `ss` run | `CommandError`, `ParsingError` |
 | `get_routing_snapshot()` | `RoutingSnapshot(hostname, interface, ip_address, gateway, routes, errors)` | none for command or parsing failures |
 | `get_network_interfaces()` | `list[NetworkInterface]` | `CommandError`, `ParsingError` |
+| `collect_diagnostic_snapshot(...)` | `DiagnosticSnapshot`, see [Diagnostic snapshot](#diagnostic-snapshot) | `ValidationError` (before any command) |
 
 Error contract:
 
@@ -215,6 +220,175 @@ Error contract:
   route) is recorded as a `ParsingError` message in `RoutingSnapshot.errors` for
   `interface`, `ip_address`, and `gateway`, and as a failed gateway `PingResult`.
 - Only `CommandError` and `ParsingError` are caught. Programming errors propagate.
+
+## Diagnostic snapshot
+
+A `DiagnosticSnapshot` (`network_diagnostic.core.models`) records the observations of
+one collection run: routing, interfaces, listening sockets, pings, the DNS query, the
+DNS response time, and address lookups. It holds measured observations only; it does
+not classify problems or suggest repairs. A future Analysis Engine can refer to a
+snapshot by `snapshot_id` and to each operation by its `operation_id`.
+
+```python
+from network_diagnostic.diagnostic_service import collect_diagnostic_snapshot
+from network_diagnostic.core.snapshot_serialization import snapshot_to_dict
+
+# Local collection only: no pings, no DNS lookups.
+snapshot = collect_diagnostic_snapshot(
+    ping_targets=(), address_hostnames=(),
+    include_dns_query=False, include_dns_latency=False,
+)
+print(snapshot.routing.status, snapshot.interfaces.status)
+data = snapshot_to_dict(snapshot)  # fresh dict of JSON-compatible values
+```
+
+`collect_diagnostic_snapshot()` takes keyword arguments only:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `ping_targets` | `DEFAULT_PING_TARGETS` (`localhost`, `gateway`, `internet`, `google.com`) | Up to four unique ping aliases, in the order given |
+| `dns_hostname` | `DEFAULT_DNS_HOSTNAME` (`google.com`) | Name for the DNS query and DNS response-time measurement |
+| `address_hostnames` | `ADDRESS_LOOKUP_HOSTNAMES` | Up to four unique names for IPv4/IPv6 address lookups |
+| `include_routing`, `include_interfaces`, `include_listening_sockets`, `include_dns_query`, `include_dns_latency` | `True` | Collect the section (must be a real `bool`) |
+
+Targets are passed as a list or tuple; empty ones are allowed. The whole request is
+validated (aliases, duplicates, counts, hostnames with the existing hostname validator,
+flag types) and an invalid request raises `ValidationError` before any command runs.
+Operations run one after another in a fixed order. On a platform other than Linux no
+command runs.
+
+The default request causes external network traffic: ICMP echo requests to `8.8.8.8`
+(`internet`) and `google.com`, a `getent` and a `dig` query for `google.com`, and address
+lookups for the four default names. The `gateway` ping reads the routing table again.
+Empty target tuples and `include_dns_query=False`, `include_dns_latency=False` keep the
+collection local.
+
+Each section is a `CollectionResult` with `operation_id`, `source`, `target`, `status`,
+`value`, `issues`, and per-operation `started_at`, `finished_at`, and
+`duration_seconds`. Snapshot and operation timestamps are UTC wall-clock times;
+durations come from a monotonic clock, so a wall-clock change never makes them negative.
+
+| Status | Meaning | `value` | Timing |
+| --- | --- | --- | --- |
+| `COMPLETED` | Observation collected without collection errors | required | yes |
+| `PARTIAL` | Usable observation, but identified fields failed (routing only) | required | yes |
+| `FAILED` | The command, parsing, measurement, or result validation failed | `None` | yes |
+| `TIMEOUT` | A command timed out | `None` | yes |
+| `UNAVAILABLE` | A required command is not installed | `None` | yes |
+| `UNSUPPORTED` | Not a Linux system; nothing was run | `None` | no |
+| `NOT_COLLECTED` | The section was not requested | `None` | no |
+
+Issues carry a controlled `code`, a fixed `message`, and for routing the affected
+`field`. Error categories come only from exception types, never from error texts. When
+a legacy function has already lost the exception type (ping, the routing parts, a
+failed DNS result), the generic code `measurement_failed` is used; a missing `ping` or
+`ip` command is therefore `FAILED`, not `UNAVAILABLE`. When the routing table cannot be
+read but the hostname can, routing is `PARTIAL` with `measurement_failed` for `routes`
+and `dependency_unavailable` for `interface`, `ip_address`, and `gateway`.
+
+Negative network observations are collected results, not collection failures: total
+packet loss, a name that is not resolved, NXDOMAIN or SERVFAIL from a received DNS
+reply, 0 ms, empty lists, and a missing gateway or round-trip time are `COMPLETED`.
+
+Every collected value is validated before it is stored (types, finite non-negative
+numbers, loss 0–100, received ≤ sent, DNS answer count ≤ 65535, ports, IP syntax, the
+ping alias and DNS name matching the operation target, IPv6 scopes as interface names,
+no C0/C1 control characters, integers within 2**53 − 1).
+A value that fails this check becomes `FAILED` with `invalid_result`. The snapshot holds
+detached copies without legacy error texts, raw output, or analysis fields; it is a
+mutable object owned by the caller, not tamper-proof evidence. `validate()` rechecks a
+snapshot after changes.
+
+### Serialization
+
+`snapshot_to_dict(snapshot)` revalidates the snapshot, including nested values, and
+builds new dicts and lists from explicit per-model field lists. Enums become their
+values, timestamps ISO 8601 strings, and tuples lists; `None` is kept. Non-finite numbers
+and integers beyond 2**53 − 1 are rejected with `ValueError` instead of being changed,
+so `json.dumps(data, allow_nan=False)` succeeds for every valid snapshot. Nothing is
+written to disk, logged, or sent; there is no deserialization.
+
+Exported fields per model:
+
+| Model | Fields |
+| --- | --- |
+| `RoutingSnapshot` | `hostname`, `interface`, `ip_address`, `gateway` |
+| `NetworkInterface` | `device`, `interface_type`, `state`, `connection` |
+| `ListeningSocket` | `protocol`, `state`, `local_address`, `local_port`, `peer_address`, `peer_port` (ports stay strings, `*` allowed) |
+| `PingResult` | `target`, `execution_status`, `packets_sent`, `packets_received`, `packet_loss_percent`, `min_rtt_ms`, `avg_rtt_ms`, `max_rtt_ms`, `mdev_ms`, `reachable`, `icmp_errors` |
+| `DnsQueryResult` | `hostname`, `execution_status`, `resolved`, `ip_address` |
+| `DnsLatencyResult` | `hostname`, `execution_status`, `dns_status`, `resolved`, `dns_latency_ms`, `answer_count` |
+| `DnsAddressResult` | `hostname`, `execution_status`, `ipv4_addresses`, `ipv6_addresses` |
+| `CollectionIssue` | `code`, `message` (from the fixed message table), `field` |
+
+Never exported: raw routing-table lines (`RoutingSnapshot.routes`, which stays in the
+in-memory model), `errors`/`error` texts, `raw_output`, the analysis classifications
+`packet_loss_status`, `latency_analysis`, and `rtt_range_analysis`, and suggested service
+names. The exported snapshot therefore does not contain all information of the
+in-memory `RoutingSnapshot`.
+
+Synthetic example (shortened; routing table unreadable, `nmcli` missing, local
+collection with one ping):
+
+```json
+{
+  "schema_version": 1,
+  "snapshot_id": "3f2b8c1e-6d4a-4f0b-9a7e-2c5d1e8f9a01",
+  "started_at": "2026-11-26T12:00:00+00:00",
+  "finished_at": "2026-11-26T12:00:09+00:00",
+  "duration_seconds": 2.25,
+  "routing": {
+    "operation_id": "routing", "source": "linux_routing", "target": null,
+    "status": "partial",
+    "value": {"hostname": "example-host", "interface": null, "ip_address": null, "gateway": null},
+    "issues": [
+      {"code": "measurement_failed", "message": "Diagnostic measurement did not complete.", "field": "routes"},
+      {"code": "dependency_unavailable", "message": "A required observation is unavailable.", "field": "interface"}
+    ],
+    "started_at": "2026-11-26T12:00:01+00:00", "finished_at": "2026-11-26T12:00:02+00:00",
+    "duration_seconds": 0.25
+  },
+  "interfaces": {
+    "operation_id": "interfaces", "source": "network_manager", "target": null,
+    "status": "unavailable", "value": null,
+    "issues": [{"code": "command_unavailable", "message": "Required diagnostic command is unavailable.", "field": null}],
+    "started_at": "2026-11-26T12:00:03+00:00", "finished_at": "2026-11-26T12:00:04+00:00",
+    "duration_seconds": 0.25
+  },
+  "pings": [
+    {
+      "operation_id": "ping.localhost", "source": "icmp_echo", "target": "localhost",
+      "status": "completed",
+      "value": {
+        "target": "localhost", "execution_status": "completed",
+        "packets_sent": 4, "packets_received": 4, "packet_loss_percent": 0.0,
+        "min_rtt_ms": 0.04, "avg_rtt_ms": 0.05, "max_rtt_ms": 0.07, "mdev_ms": 0.01,
+        "reachable": true, "icmp_errors": null
+      },
+      "issues": [],
+      "started_at": "2026-11-26T12:00:07+00:00", "finished_at": "2026-11-26T12:00:08+00:00",
+      "duration_seconds": 0.25
+    }
+  ],
+  "dns_query": {
+    "operation_id": "dns.query", "source": "system_resolver", "target": "google.com",
+    "status": "not_collected", "value": null,
+    "issues": [{"code": "not_requested", "message": "Diagnostic operation was not requested.", "field": null}],
+    "started_at": null, "finished_at": null, "duration_seconds": null
+  },
+  "dns_addresses": []
+}
+```
+
+Privacy and output safety:
+
+- Serialization does not anonymize. IP addresses, hostnames, interface and connection
+  names (often Wi-Fi SSIDs), the gateway, and listening sockets are sensitive network
+  inventory; share exported snapshots only deliberately.
+- JSON escaping does not make text safe for HTML, a GUI, logs, or a terminal. Text with
+  C0/C1 control characters is rejected, but other untrusted text is kept as observed,
+  including `<script>`, Unicode bidirectional controls, zero-width characters, and the
+  line separators U+2028/U+2029; every consumer must escape for its own output context.
 
 ## Command execution
 
@@ -545,4 +719,8 @@ CI also runs the tests in reverse order to detect order dependencies (see
   installing the package (for metadata) and, to test the current source, `PYTHONPATH=/app/src`.
 - The package is not published to PyPI, and building it requires setuptools, which pip
   downloads from PyPI when it is not already available.
+- A diagnostic snapshot is collected sequentially and is not atomic; it cannot be
+  cancelled as a whole and has no overall time limit. With the current per-command
+  timeouts the default request can take about 200 seconds in the worst case; this is an
+  estimate, not a guaranteed upper bound.
 - Open diagnostic limitations are listed in [known issues](tests/KNOWN_ISSUES.md).

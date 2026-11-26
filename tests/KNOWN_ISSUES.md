@@ -277,6 +277,40 @@ Vaiheen 13 rajaukset:
 - Todellisen Linux-ympäristön hyväksyntätestaus puuttuu edelleen; ohje:
   `docs/testing/manual-acceptance-tests.md` (paikallinen, ei versionhallinnassa).
 
+Vaiheen 14 rajaukset (Diagnostic Snapshot ja sarjoitus):
+
+- Keräys on peräkkäinen eikä atominen: osiot kuvaavat eri ajanhetkiä. Kokonaiskeräystä ei voi
+  peruuttaa, eikä sillä ole kokonaisaikarajaa. Oletuspyynnön kumulatiivinen
+  aikakatkaisubudjetti on arviolta noin 200 s (reititys 30 s, nmcli ja ss 10 s kumpikin,
+  pingit 50 s, josta gateway 20 s, getent ja dig 10 s kumpikin, osoitehaut 4 × 2 × 10 s). Arvio
+  ei ole taattu kokonaiskeston yläraja.
+- Kadonneita poikkeustyyppejä ei voi palauttaa. Ping, reitityksen osat ja epäonnistuneet
+  DNS-tulokset raportoidaan yleisellä koodilla `measurement_failed`, joten esimerkiksi
+  puuttuva `ping`- tai `ip`-komento näkyy tilana FAILED eikä UNAVAILABLE. Virhetekstistä
+  ei päätellä tilaa.
+- PARTIAL on tuettu vain reititykselle. `dns.ipv_check()` on yhden nimen osalta edelleen kaikki
+  tai ei mitään (IPv4- ja IPv6-osatuloksia ei eroteta).
+- `RoutingSnapshot.routes` sisältää raakoja `ip route` -rivejä. Niitä ei viedä sarjoitettuun
+  snapshotiin (D1), joten vienti ei sisällä kaikkea muistissa olevan mallin tietoa. Rakenteinen
+  reittimalli arvioidaan erillisenä tehtävänä ennen reittien käyttöä automaattisessa
+  analyysissä.
+- Sarjoitus ei anonymisoi: IP-osoitteet, hostnamet, liitäntä- ja yhteysnimet (SSID), gateway
+  ja socketit ovat arkaluonteisia (D2). C0/C1-ohjausmerkit hylätään, mutta JSON-escapointi ei
+  tee datasta turvallista HTML-, GUI-, loki- tai päätetulostukseen. Unicoden bidi-ohjausmerkkejä
+  (U+202A–U+202E, U+2066–U+2069), nollaleveitä merkkejä (U+200B–U+200F, U+FEFF) ja
+  rivierottimia U+2028/U+2029 ei hylätä, koska yksi vihamielinen SSID muuttaisi muuten koko
+  osion virheelliseksi. Rivierottimet voivat aiheuttaa rivinvaihtoinjektion lokeissa tai
+  päätteessä, jos JSON tuotetaan asetuksella `ensure_ascii=False`. Tulevan GUI:n (vaihe 22) on
+  escapoitava tai näytettävä nämä merkit näkyvästi ennen datan renderöintiä (D3).
+- Snapshot on muuttuva ja kutsujan omistama. `validate()` tarkistaa sen uudelleen, mutta se
+  ei ole manipulaatiolta suojattu todistusaineisto.
+- Gateway-ping lukee reititystaulun uudelleen, joten se voi kuvata eri hetken kuin
+  reititysosio.
+- Command Runner kopioi koko ympäristön, myös `PATH`-muuttujan, eikä rajaa tulosteen
+  muistinkulutusta. Command Runnerin resurssirajat, turvallinen ohjelmien resoluutio
+  (kiinteä `PATH`) ja kokonaiskeräyksen aikaraja on käsiteltävä ennen hallittujen
+  korjaustoimintojen käyttöönottoa (vaiheet 17–21).
+
 Suunnitellut käsittelyvaiheet (roadmap `docs/plans/project-roadmap.md`, paikallinen):
 
 | Avoin rajoite | Vaihe |
@@ -286,6 +320,7 @@ Suunnitellut käsittelyvaiheet (roadmap `docs/plans/project-roadmap.md`, paikall
 | getent-tulosten tulkinnan epävarmuus | 16 |
 | Socket-osoitteiden luokittelu | 16 |
 | Palvelukutsujen keskeyttäminen | 24 |
+| Snapshot-tekstin Unicode-ohjausmerkkien escapointi ennen renderöintiä | 22 |
 | Python 3.11-, 3.13- ja 3.14-yhteensopivuustestaus | CI (vaihe 13.2); Docker-testaus erikseen |
 
 Nykyistä diagnostiikkalogiikkaa ei ole muutettu näiden tulevien tehtävien vuoksi.

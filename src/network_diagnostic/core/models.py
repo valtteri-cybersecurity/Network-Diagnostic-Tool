@@ -1,10 +1,14 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import ipaddress
 import math
 import re
 from typing import Generic, Optional, TypeVar
 from uuid import UUID
+
+from network_diagnostic.core.exceptions import ValidationError
+from network_diagnostic.core.validation import validate_interface_name, validate_ipv4_address
 
 
 @dataclass
@@ -199,19 +203,275 @@ _T = TypeVar("_T")
 def _validate_utc(value: datetime) -> None:
     # Only datetime.timezone.utc: a zero offset alone also matches zones such as
     # Europe/London in winter, which are not UTC.
-    if not isinstance(value, datetime) or value.tzinfo is not timezone.utc:
+    if type(value) is not datetime or value.tzinfo is not timezone.utc:
         raise ValueError("timestamps must be timezone-aware UTC datetimes")
 
 
 def _validate_duration(value: float) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise ValueError("duration must be a finite non-negative number")
     try:
         valid = math.isfinite(value) and value >= 0
+        if type(value) is int and value > _MAX_SAFE_INTEGER:
+            valid = False
     except OverflowError:
         valid = False
     if not valid:
         raise ValueError("duration must be a finite non-negative number")
+
+
+# C0 controls, DEL and C1 controls. Observed strings are rejected, never cleaned.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_PORT_TEXT = re.compile(r"[0-9]{1,5}")
+_DNS_STATUS_TEXT = re.compile(r"[A-Z][A-Z0-9]{0,31}")
+_MAX_PORT = 65535
+# Largest integer that JSON consumers (JavaScript) represent exactly.
+_MAX_SAFE_INTEGER = 2**53 - 1
+_MAX_DNS_ANSWER_COUNT = 65535  # DNS ANCOUNT is a 16-bit field.
+_ROUTING_REQUIRED_NONE = "issue field must be unavailable in the routing value"
+
+
+def _fail(message: str):
+    raise ValueError(message)
+
+
+def _text(value, *, optional=True, single_token=False) -> None:
+    """Accept an exact str without control characters; None only if optional."""
+    if value is None and optional:
+        return
+    if type(value) is not str or _CONTROL_CHARACTERS.search(value) is not None:
+        _fail("observation text must be a string without control characters")
+    if single_token and (not value or value.split() != [value]):
+        _fail("observation token must be non-empty and contain no whitespace")
+
+
+def _free_text(value) -> None:
+    """Type-only check for legacy free text that is never exported."""
+    if value is not None and type(value) is not str:
+        _fail("legacy text field must be a string or None")
+
+
+def _number(value, maximum=None) -> None:
+    """None, or an exact int/float (not bool) that is finite and >= 0."""
+    if value is None:
+        return
+    if type(value) not in (int, float):
+        _fail("measurement must be a number")
+    try:
+        valid = math.isfinite(value) and value >= 0 and (maximum is None or value <= maximum)
+        if type(value) is int and value > _MAX_SAFE_INTEGER:
+            valid = False
+    except OverflowError:
+        valid = False
+    if not valid:
+        _fail("measurement must be finite, non-negative and within its range")
+
+
+def _count(value, maximum=None) -> None:
+    if value is None:
+        return
+    if type(value) is not int or value < 0 or value > _MAX_SAFE_INTEGER or (maximum is not None and value > maximum):
+        _fail("count must be a non-negative integer within its range")
+
+
+def _flag(value) -> None:
+    if value is not None and type(value) is not bool:
+        _fail("flag must be a bool or None")
+
+
+def _enum(value, enum_type) -> None:
+    if type(value) is not enum_type:
+        _fail("status must be the expected enum type")
+
+
+def _ip_text(value, version=None) -> None:
+    """None, or an IP address string; optionally of one IP version."""
+    if value is None:
+        return
+    _text(value)
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        _fail("invalid IP address")
+    if version is not None and address.version != version:
+        _fail("IP address has the wrong version")
+    if "%" in value:
+        # Same scope rule as socket addresses: a conservative interface name.
+        _routing_interface(value.split("%", 1)[1])
+
+
+def _routing_address(value) -> None:
+    if value is None:
+        return
+    _text(value)
+    try:
+        validate_ipv4_address(value)
+    except ValidationError:
+        _fail("invalid IPv4 address")
+
+
+def _routing_interface(value) -> None:
+    if value is None:
+        return
+    _text(value)
+    try:
+        validate_interface_name(value)
+    except ValidationError:
+        _fail("invalid interface name")
+
+
+def _port_text(value) -> None:
+    if value is None:
+        return
+    _text(value)
+    if value != "*" and (_PORT_TEXT.fullmatch(value) is None or int(value) > _MAX_PORT):
+        _fail("port must be * or 0-65535")
+
+
+def _socket_address(value) -> None:
+    """Mirror parse_ss_output: *, IPv4 or bracketed IPv6, optional %scope."""
+    if value is None:
+        return
+    _text(value, single_token=True)
+    host, scope = value, None
+    if host.startswith("["):
+        closing = host.find("]")
+        if closing == -1 or (host[closing + 1:] and not host[closing + 1:].startswith("%")):
+            _fail("invalid socket address")
+        scope = host[closing + 2:] if host[closing + 1:] else None
+        host = host[1:closing]
+    if "%" in host:
+        if scope is not None:
+            _fail("invalid socket address")
+        host, scope = host.split("%", 1)
+    if scope is not None:
+        _routing_interface(scope)
+    try:
+        if host == "*":
+            return
+        if ":" in host:
+            ipaddress.IPv6Address(host)
+        else:
+            validate_ipv4_address(host)
+    except (ValueError, ValidationError):
+        _fail("invalid socket address")
+
+
+def _validate_routing_value(value, status, issues) -> None:
+    if type(value) is not RoutingSnapshot:
+        _fail("routing value must be a RoutingSnapshot")
+    _text(value.hostname)
+    _routing_interface(value.interface)
+    _routing_address(value.ip_address)
+    _routing_address(value.gateway)
+    if value.routes is not None:
+        if type(value.routes) is not list or any(type(line) is not str for line in value.routes):
+            _fail("routes must be a list of strings")
+    if (
+        type(value.errors) is not dict
+        or any(key not in _ROUTING_FIELDS or type(key) is not str for key in value.errors)
+        or any(type(message) is not str for message in value.errors.values())
+    ):
+        _fail("routing errors must map routing field names to strings")
+    if status is CollectionStatus.COMPLETED and value.errors:
+        _fail("completed routing value must have no errors")
+    if status is CollectionStatus.PARTIAL:
+        for issue in issues:
+            if getattr(value, issue.field) is not None:
+                _fail(_ROUTING_REQUIRED_NONE)
+
+
+def _validate_interfaces_value(value) -> None:
+    if type(value) is not list:
+        _fail("interfaces value must be a list")
+    for item in value:
+        if type(item) is not NetworkInterface:
+            _fail("interfaces list must hold NetworkInterface objects")
+        for text in (item.device, item.interface_type, item.state, item.connection):
+            _text(text)
+
+
+def _validate_sockets_value(value) -> None:
+    if type(value) is not list:
+        _fail("sockets value must be a list")
+    for item in value:
+        if type(item) is not ListeningSocket:
+            _fail("sockets list must hold ListeningSocket objects")
+        for token in (item.protocol, item.state):
+            if token is not None:
+                _text(token, single_token=True)
+        _socket_address(item.local_address)
+        _socket_address(item.peer_address)
+        _port_text(item.local_port)
+        _port_text(item.peer_port)
+
+
+def _validate_ping_value(value, target) -> None:
+    if type(value) is not PingResult:
+        _fail("ping value must be a PingResult")
+    if value.execution_status is not ExecutionStatus.COMPLETED:
+        _fail("collected value must have a completed execution status")
+    if type(value.target) is not str or value.target != target:
+        _fail("ping value target must match the envelope target")
+    _count(value.packets_sent)
+    _count(value.packets_received)
+    _count(value.icmp_errors)
+    if (
+        value.packets_sent is not None and value.packets_received is not None
+        and value.packets_received > value.packets_sent
+    ):
+        _fail("packets_received must not exceed packets_sent")
+    _number(value.packet_loss_percent, 100)
+    for rtt in (value.min_rtt_ms, value.avg_rtt_ms, value.max_rtt_ms, value.mdev_ms):
+        _number(rtt)
+    _flag(value.reachable)
+    _enum(value.packet_loss_status, PacketLossStatus)
+    for legacy in (value.error, value.raw_output, value.latency_analysis, value.rtt_range_analysis):
+        _free_text(legacy)
+
+
+def _validate_dns_common(value, target) -> None:
+    if value.execution_status is not ExecutionStatus.COMPLETED:
+        _fail("collected value must have a completed execution status")
+    if type(value.hostname) is not str or value.hostname != target:
+        _fail("DNS value hostname must match the envelope target")
+    _free_text(value.error)
+
+
+def _validate_dns_query_value(value, target) -> None:
+    if type(value) is not DnsQueryResult:
+        _fail("dns.query value must be a DnsQueryResult")
+    _validate_dns_common(value, target)
+    _flag(value.resolved)
+    _ip_text(value.ip_address)
+
+
+def _validate_dns_latency_value(value, target) -> None:
+    if type(value) is not DnsLatencyResult:
+        _fail("dns.latency value must be a DnsLatencyResult")
+    _validate_dns_common(value, target)
+    if value.dns_status is not None:
+        _text(value.dns_status)
+        if _DNS_STATUS_TEXT.fullmatch(value.dns_status) is None:
+            _fail("invalid DNS status")
+    _flag(value.resolved)
+    _number(value.dns_latency_ms)
+    _count(value.answer_count, _MAX_DNS_ANSWER_COUNT)
+    if value.latency_analysis is not None and type(value.latency_analysis) is not LatencyAnalysis:
+        _fail("latency_analysis must be a LatencyAnalysis")
+
+
+def _validate_dns_addresses_value(value, target) -> None:
+    if type(value) is not DnsAddressResult:
+        _fail("dns.addresses value must be a DnsAddressResult")
+    _validate_dns_common(value, target)
+    for addresses, version in ((value.ipv4_addresses, 4), (value.ipv6_addresses, 6)):
+        if type(addresses) is not list:
+            _fail("address lists must be lists")
+        for address in addresses:
+            if address is None:
+                _fail("address lists must not contain None")
+            _ip_text(address, version)
 
 
 @dataclass
@@ -266,7 +526,7 @@ class CollectionResult(Generic[_T]):
         self.validate()
 
     def validate(self) -> None:
-        """Validate the envelope, not all fields of legacy observation models."""
+        """Validate the envelope and its non-None value against the operation kind."""
         if not isinstance(self.status, CollectionStatus):
             raise ValueError("status must be a CollectionStatus")
         if type(self.operation_id) is not str:
@@ -298,8 +558,14 @@ class CollectionResult(Generic[_T]):
             isinstance(issue, CollectionIssue) for issue in self.issues
         ):
             raise ValueError("issues must be a tuple of CollectionIssue objects")
+        seen_issues = set()
         for issue in self.issues:
             issue.validate()
+            # Unique (code, field) pairs bound the tuple by the allowed codes
+            # times the allowed fields of the operation; no global limit needed.
+            if (issue.code, issue.field) in seen_issues:
+                raise ValueError("duplicate collection issues are not allowed")
+            seen_issues.add((issue.code, issue.field))
             if issue.code not in _STATUS_ISSUE_CODES[self.status]:
                 raise ValueError("collection issue code contradicts collection status")
             if issue.field is not None and kind != "routing":
@@ -314,6 +580,8 @@ class CollectionResult(Generic[_T]):
                 raise ValueError("partial results require a value and identified issues")
         elif self.value is not None or not self.issues:
             raise ValueError("unsuccessful or uncollected results require no value and explanatory issues")
+        if self.value is not None:
+            self._validate_value(kind)
 
         timing = (self.started_at, self.finished_at, self.duration_seconds)
         if all(value is None for value in timing):
@@ -329,6 +597,23 @@ class CollectionResult(Generic[_T]):
             _validate_utc(self.started_at)
             _validate_utc(self.finished_at)
             _validate_duration(self.duration_seconds)
+
+    def _validate_value(self, kind: str) -> None:
+        """Validate the observation against its operation, never transforming it."""
+        if kind == "routing":
+            _validate_routing_value(self.value, self.status, self.issues)
+        elif kind == "interfaces":
+            _validate_interfaces_value(self.value)
+        elif kind == "listening_sockets":
+            _validate_sockets_value(self.value)
+        elif kind == "ping":
+            _validate_ping_value(self.value, self.target)
+        elif kind == "dns.query":
+            _validate_dns_query_value(self.value, self.target)
+        elif kind == "dns.latency":
+            _validate_dns_latency_value(self.value, self.target)
+        else:
+            _validate_dns_addresses_value(self.value, self.target)
 
 
 def _validate_snapshot_section(result, operation_id, value_type, item_type=None) -> None:
@@ -381,7 +666,7 @@ class DiagnosticSnapshot:
         """Recheck schema and section contracts without reinterpreting observations."""
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("snapshot schema_version must be 1")
-        if not isinstance(self.snapshot_id, str):
+        if type(self.snapshot_id) is not str:
             raise ValueError("snapshot_id must be a canonical UUID4 string")
         try:
             identifier = UUID(self.snapshot_id)
