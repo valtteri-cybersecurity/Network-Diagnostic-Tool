@@ -1,6 +1,6 @@
 [build-system]
-# setuptools 64 adds PEP 660 editable installs for the src layout.
-requires = ["setuptools>=64"]
+# Minimum version includes the reported setuptools security fixes.
+requires = ["setuptools>=84.1.0"]
 build-backend = "setuptools.build_meta"
 
 [project]

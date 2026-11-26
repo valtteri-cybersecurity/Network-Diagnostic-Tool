@@ -24,6 +24,7 @@ env:
   PRIMARY_PYTHON: "3.12"
   # Installer version used in every environment; it is audited with the dependencies.
   PIP_VERSION: "26.3"
+  SETUPTOOLS_VERSION: "84.2.1"
   PIP_AUDIT_VERSION: "2.10.1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_INPUT: "1"
@@ -55,6 +56,10 @@ jobs:
           pip-version: ${{ env.PIP_VERSION }}
           cache: pip
           cache-dependency-path: requirements-dev.txt
+
+      - name: Upgrade setuptools on Python 3.11
+        if: ${{ matrix.python-version == '3.11' }}
+        run: python -m pip install --upgrade "setuptools==$SETUPTOOLS_VERSION"
 
       - name: Install test dependencies and the package
         run: |
