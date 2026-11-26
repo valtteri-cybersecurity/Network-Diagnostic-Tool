@@ -148,6 +148,17 @@ Tietomallien tyyppivihjeet eivät validoi mittausarvoja ajon aikana. Vaiheesta 9
 komentotulosteet validoidaan `parsers.py`-moduulissa ennen tietomallien muodostamista.
 Itse muodostetut mallit (esim. GUI:sta) eivät kulje parserien kautta.
 
+Vaiheen 11 rajaukset (Service Layer):
+
+- `get_listening_ports()` on edelleen kaikki tai ei mitään. Yksikin tunnistamaton `ss`-rivi
+  estää koko socket-listan, koska vaiheen 10 parserisopimusta ei muutettu.
+- `dns.ipv_check()` on yhden nimen osalta kaikki tai ei mitään: jos IPv6-haku epäonnistuu,
+  saman nimen onnistunut IPv4-tulos katoaa. Service Layer säilyttää muiden nimien tulokset.
+- `RoutingSnapshot.errors` tallentaa virheen tekstinä, joten poikkeuksen tyyppi (esim.
+  aikakatkaisu) näkyy vain viestissä.
+- Python 3.9 -yhteensopivuus on tarkistettu vain syntaksin osalta. Testejä ei ole ajettu
+  Python 3.9 -tulkilla.
+
 Vaiheen 10 rajaukset:
 
 - Multipath-oletusreitin (`nexthop`) seuraavan hypyn arvoja ei jäsennetä, joten liitäntä ja

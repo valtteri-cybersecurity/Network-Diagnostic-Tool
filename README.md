@@ -17,7 +17,7 @@ A Python command-line tool for basic network troubleshooting on Linux. It combin
 
 ## Requirements
 
-- Linux with Python 3.9 or newer.
+- Linux with Python 3.9 or newer. (Only Python 3.9 syntax compatibility has been checked; the test suite has not yet been run on a Python 3.9 interpreter.)
 - NetworkManager for interface status reporting.
 - The following commands: ping, ip, ss, nmcli, getent, dig, hostname, and clear.
 
@@ -50,13 +50,13 @@ Choose a numbered action from the menu:
 
 Each submenu includes a return option. Invalid selections prompt for another input. Press Ctrl+C to close the application.
 
-The current version uses predefined targets. To change them, edit the target definitions in main.py and ping.py.
+The current version uses predefined targets. To change them, edit the target definitions in diagnostic_service.py (DNS hostnames) and ping.py (ping targets).
 
 ## Error handling
 
 Network and DNS commands have a 10-second execution limit. Ping also has a 10-second limit; it waits at most two seconds for a reply when none has arrived (`-W 2`), so complete packet loss is reported as a completed measurement instead of a timeout. DNS queries made with dig use a three-second query timeout and one attempt, within the overall execution limit. When no DNS server replies (dig exit code 9), the DNS latency test returns a `timeout` result (`failed` for other no-reply cases such as a refused connection) with the error `No reply from DNS server`.
 
-Missing commands, command failures, and timeouts are reported to the user. Network and DNS execution errors return to the main menu. If NetworkManager status is unavailable, the main menu remains accessible.
+Missing commands, command failures, and timeouts are reported to the user. Network and DNS execution errors return to the main menu. The system snapshot and the IPv4 / IPv6 address test instead show the parts that succeeded together with the errors of the parts that failed (see [Service layer](#service-layer)). If NetworkManager status is unavailable, the main menu remains accessible.
 
 Inputs that are rejected before a command runs raise `ValidationError`. The CLI reports them like other expected errors and returns to the main menu; ping reports them as a failed `PingResult`.
 
@@ -66,7 +66,8 @@ A hostname not found by getent is reported as an unsuccessful lookup. DNS respon
 
 | File | Responsibility |
 | --- | --- |
-| main.py | Menu navigation and coordination |
+| main.py | Menu navigation, user choices, and error display |
+| diagnostic_service.py | UI-independent application interface that coordinates the engine |
 | command_runner.py | Safe command execution, timeouts, and execution timing |
 | exceptions.py | Shared diagnostic, validation, parsing, and command exceptions |
 | validation.py | Input validation before commands are executed |
@@ -84,20 +85,58 @@ builds result models, and classifies measurements. It never prints, prompts,
 clears the screen, or imports `main` or `output`. Importing modules runs no commands.
 
 `main.py` owns input, navigation, diagnostic selection, and expected-error handling.
-It forwards engine results to `output.py`, which only renders supplied data and
+It calls only `diagnostic_service` and forwards the results to `output.py`, which only renders supplied data and
 analyses. Output functions return no analysis data and do not modify result models
 or run diagnostics. All print calls and terminal clearing remain in `output.py`.
 
-Dependencies flow from CLI to engine: `main` calls diagnostic/analysis functions
-and `output`; `output` uses only the shared models and standard-library formatting.
+Dependencies flow from CLI to service layer to engine: `main` calls
+`diagnostic_service` and `output`; `diagnostic_service` calls `ping`, `dns`, `network`,
+`parsers`, `analysis`, and `validation` but never `main`, `output`, or `subprocess`;
+`output` uses only the shared models and standard-library formatting.
 `ping` uses `network`, `analysis`, `parsers`, and the command runner; `dns` and `network`
 use `parsers` and the runner; `analysis` uses models and `parsers.parse_port()`.
-`main` uses `parsers` for socket and NetworkManager rows. `ping`, `dns`, `network`,
+`ping`, `dns`, `network`,
 `parsers`, and the runner use `validation`, which depends only on shared exceptions.
 `parsers` uses models, shared exceptions, and `validation` only. The runner uses
 models and shared exceptions.
-There are no engine-to-CLI dependencies or circular imports. A future GUI can
-call the same engine functions and render the same results without CLI imports.
+There are no engine-to-service, engine-to-CLI, or circular dependencies. A future GUI
+can call the same service functions and render the same results without CLI imports.
+
+## Service layer
+
+`diagnostic_service.py` is the application interface for the CLI, a future GUI,
+and direct Python use. It consists of plain synchronous functions without state,
+so a GUI can call them from a worker thread. They never print or prompt and return
+dataclasses from `models.py`.
+
+| Function | Returns | Errors raised |
+| --- | --- | --- |
+| `get_connection_status()` | `bool`: a non-loopback device is connected | `CommandError`, `ParsingError` |
+| `run_ping_diagnostic(target)` | `PingResult` for `localhost`, `gateway`, `internet`, or `google.com` | none: failures are `FAILED`/`TIMEOUT` results |
+| `run_dns_query(hostname="google.com")` | `DnsQueryResult` | `ValidationError`, `CommandError` |
+| `run_dns_latency_test(hostname="google.com")` | `DnsLatencyResult` with `latency_analysis` when a latency was measured | `ValidationError`, `CommandError` |
+| `lookup_ip_addresses(hostnames=ADDRESS_LOOKUP_HOSTNAMES)` | `list[DnsAddressResult]` in input order | `ValidationError` (before any lookup) |
+| `get_listening_ports()` | `ListeningPortReport(sockets, counts, services)` from one `ss` run | `CommandError`, `ParsingError` |
+| `get_routing_snapshot()` | `RoutingSnapshot(hostname, interface, ip_address, gateway, routes, errors)` | none for command or parsing failures |
+| `get_network_interfaces()` | `list[NetworkInterface]` | `CommandError` |
+
+Error contract:
+
+- Caller input is validated before any command runs; invalid input raises
+  `ValidationError`. Ping keeps its contract of returning a failed `PingResult`.
+- A function based on one diagnostic operation lets `CommandError` and
+  `ParsingError` propagate. Measurements, including negative results, are returned.
+- A function based on independent operations returns the parts that succeeded.
+  `lookup_ip_addresses()` stores a failed lookup as a `DnsAddressResult` with
+  status `FAILED` or `TIMEOUT` and an error, and continues with the other names.
+  `get_routing_snapshot()` reads the routing table once; the hostname does not
+  depend on it, while the interface, address, and gateway are read only when it is
+  available. Failed parts stay `None` and their messages are stored in `errors`
+  (keys `routes`, `hostname`, `interface`, `ip_address`, `gateway`). `routes=None`
+  means the routing table is unavailable; `[]` means it has no routes.
+- `get_listening_ports()` is all-or-nothing: an unrecognized `ss` line raises
+  `ParsingError` so that an incomplete socket list is never shown as complete.
+- Only `CommandError` and `ParsingError` are caught. Programming errors propagate.
 
 ## Command execution
 
@@ -194,6 +233,12 @@ access, and type hints do not perform runtime validation.
   suggested for the other protocol.
 - `LatencyAnalysis` retains the DNS latency classification's existing measurement
   and status together. Analysis remains in `analysis.py`, outside the data models.
+  The service layer stores it in `DnsLatencyResult.latency_analysis` only when a
+  latency was measured.
+- `ListeningPortReport` and `RoutingSnapshot` combine the results of several engine
+  functions for the service layer. A `DnsAddressResult` whose status is not
+  `COMPLETED` has unknown, not empty, address lists, and the CLI shows them as
+  `Unavailable` instead of `None found`.
 
 Ping helpers return `CommandResult` or raise diagnostic exceptions. `ping_target()`
 is the single boundary that converts those exceptions into `PingResult`, preserving
@@ -312,7 +357,7 @@ python -m pytest -v
 Measure line and branch coverage for the whole application:
 
 ```bash
-python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov=parsers --cov-branch --cov-report=term-missing
+python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov=parsers --cov=diagnostic_service --cov-branch --cov-report=term-missing
 ```
 
 Tests are in `tests/`, with reusable command output in `tests/fixtures/`.
@@ -327,6 +372,11 @@ standard-library modules and runs without commands, input, or output. Parser tes
 `tests/test_parsers.py` call the parsers directly with realistic output, without
 subprocess mocks.
 Report tests check that rendering neither mutates data nor executes commands.
+Service layer tests in `tests/test_diagnostic_service.py` mock engine functions in the
+`diagnostic_service` namespace and also run a few end-to-end cases through mocked
+subprocess calls. Architecture tests check that the service layer imports only engine
+modules, never prints, prompts, or starts processes, and that neither the engine
+imports the service layer nor the CLI imports engine modules directly.
 
 ## Validation
 

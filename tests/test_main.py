@@ -10,7 +10,8 @@ import pytest
 import main
 from models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
-    LatencyAnalysis, ListeningSocket, NetworkInterface, PingResult, ServiceInfo, SocketCounts,
+    LatencyAnalysis, ListeningPortReport, ListeningSocket, NetworkInterface, PingResult,
+    RoutingSnapshot, ServiceInfo, SocketCounts,
 )
 from exceptions import (
     CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, DiagnosticError,
@@ -25,7 +26,7 @@ def user_input(monkeypatch):
     monkeypatch.setattr(main, "input", read_input, raising=False)
     monkeypatch.setattr(main.output, "clear_screen", Mock())
     monkeypatch.setattr(main.output, "mainmenu1", Mock())
-    monkeypatch.setattr(main.network, "get_network_plugin", Mock(return_value=True))
+    monkeypatch.setattr(main.diagnostic_service, "get_connection_status", Mock(return_value=True))
     return read_input
 
 
@@ -84,7 +85,7 @@ def test_main_exits_from_main_menu(user_input):
 
     assert result is None
     user_input.assert_called_once_with()
-    main.network.get_network_plugin.assert_called_once_with()
+    main.diagnostic_service.get_connection_status.assert_called_once_with()
     main.output.mainmenu1.assert_called_once_with(True)
     assert main.output.clear_screen.call_count == 2
 
@@ -115,7 +116,7 @@ def test_main_can_visit_all_submenus_in_one_session(user_input):
 
     assert user_input.call_count == 9
     assert main.output.mainmenu1.call_count == 5
-    assert main.network.get_network_plugin.call_count == 5
+    assert main.diagnostic_service.get_connection_status.call_count == 5
 
 
 @pytest.mark.parametrize("choice, target", [
@@ -127,7 +128,7 @@ def test_main_starts_selected_ping_diagnostic(choice, target, user_input, monkey
     report = PingResult(target=target)
     diagnostic = Mock(return_value=report)
     display = Mock()
-    monkeypatch.setattr(main.ping, "run_ping_diagnostic", diagnostic)
+    monkeypatch.setattr(main.diagnostic_service, "run_ping_diagnostic", diagnostic)
     monkeypatch.setattr(main.output, "display_ping_report", display)
 
     main.main()
@@ -148,19 +149,22 @@ def test_main_starts_hostname_resolution(user_input, monkeypatch):
     )
     diagnostic = Mock(return_value=report)
     display = Mock()
-    monkeypatch.setattr(main.dns, "dns_query", diagnostic)
+    monkeypatch.setattr(main.diagnostic_service, "run_dns_query", diagnostic)
     monkeypatch.setattr(main.output, "dns_query_output", display)
 
     main.main()
 
     assert user_input.call_count == 4
-    diagnostic.assert_called_once_with("google.com")
+    diagnostic.assert_called_once_with()
     display.assert_called_once_with(report)
 
 
-@pytest.mark.parametrize("latency", [None, 0.0, 12.0])
-def test_main_analyzes_dns_latency_only_when_measurement_exists(
-    latency, user_input, monkeypatch,
+# Classifying only measured latencies is tested in test_diagnostic_service.py.
+@pytest.mark.parametrize("latency, latency_analysis", [
+    (None, None), (12.0, LatencyAnalysis(latency_ms=12.0, status="EXCELLENT")),
+])
+def test_main_displays_dns_latency_with_service_analysis(
+    latency, latency_analysis, user_input, monkeypatch,
 ):
     user_input.side_effect = ["2", "2", "4", "5"]
     report = DnsLatencyResult(
@@ -168,35 +172,23 @@ def test_main_analyzes_dns_latency_only_when_measurement_exists(
         dns_status="NOERROR",
         hostname="google.com",
         execution_status=ExecutionStatus.COMPLETED,
+        latency_analysis=latency_analysis,
     )
     original_report = replace(report)
     diagnostic = Mock(return_value=report)
-    classification = LatencyAnalysis(latency_ms=latency, status="EXCELLENT")
-
-    def classify_measurement(data):
-        assert data == original_report
-        return classification
-
-    analyze = Mock(side_effect=classify_measurement)
     display = Mock()
-    monkeypatch.setattr(main.dns, "dns_latency", diagnostic)
-    monkeypatch.setattr(main.analysis, "dns_latency_analyzation", analyze)
+    monkeypatch.setattr(main.diagnostic_service, "run_dns_latency_test", diagnostic)
     monkeypatch.setattr(main.output, "dns_latency_output", display)
 
     main.main()
 
     assert user_input.call_count == 4
-    diagnostic.assert_called_once_with("google.com")
-    if latency is None:
-        analyze.assert_not_called()
-        assert report == original_report
-    else:
-        analyze.assert_called_once_with(report)
+    diagnostic.assert_called_once_with()
     assert report == original_report
-    display.assert_called_once_with(report, classification if latency is not None else None)
+    display.assert_called_once_with(report, latency_analysis)
 
 
-def test_main_starts_both_address_family_lookups_for_each_site(user_input, monkeypatch):
+def test_main_displays_address_lookups_of_all_sites(user_input, monkeypatch):
     user_input.side_effect = ["2", "3", "4", "5"]
     sites = ["google.com", "wikipedia.com", "example.com", "yle.fi"]
     reports = [DnsAddressResult(
@@ -205,35 +197,53 @@ def test_main_starts_both_address_family_lookups_for_each_site(user_input, monke
         ipv4_addresses=["192.0.2.10"],
         ipv6_addresses=[],
     ) for site in sites]
-    diagnostic = Mock(side_effect=reports)
+    diagnostic = Mock(return_value=reports)
     display = Mock()
-    monkeypatch.setattr(main.dns, "ipv_check", diagnostic)
+    monkeypatch.setattr(main.diagnostic_service, "lookup_ip_addresses", diagnostic)
     monkeypatch.setattr(main.output, "ipv_check_results_output", display)
 
     main.main()
 
     assert user_input.call_count == 4
-    assert diagnostic.call_args_list == [call(site) for site in sites]
+    diagnostic.assert_called_once_with()
     display.assert_called_once_with(reports)
+
+
+def test_main_displays_other_address_lookups_when_one_fails(user_input, subprocess_run, capsys):
+    user_input.side_effect = ["2", "3", "4", "5"]
+
+    def respond(arguments, **kwargs):
+        if arguments[2] == "wikipedia.com":
+            raise subprocess.TimeoutExpired(arguments, 10)
+        if arguments[1] == "ahostsv4":
+            return subprocess.CompletedProcess([], 0, f"192.0.2.10 STREAM {arguments[2]}\n", "")
+        return subprocess.CompletedProcess([], 2, "", "")
+
+    subprocess_run.side_effect = respond
+
+    main.main()
+
+    text = capsys.readouterr().out
+    failed = text[text.index("Hostname : wikipedia.com"):text.index("Hostname : example.com")]
+    assert "Execution: timeout" in failed
+    assert "IPv4 addresses: Unavailable" in failed
+    assert "Error    : getent timed out after 10 seconds." in failed
+    assert text.count("  - 192.0.2.10") == 3
+    assert "Hostname : yle.fi" in text
+    assert user_input.call_count == 4
+    assert main.output.mainmenu1.call_count == 2
 
 
 def test_main_displays_listening_socket_counts_and_rows(user_input, monkeypatch):
     user_input.side_effect = ["3", "1", "3", "5"]
-    raw = ["tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"]
-    parsed = [ListeningSocket(protocol="tcp", state="LISTEN", local_port="22")]
     ports = [ListeningSocket(protocol="TCP", state="LISTEN", local_port="22")]
     counts = SocketCounts(tcp_count=1, udp_count=0)
-    collect = Mock(return_value=raw)
-    parse = Mock(return_value=parsed)
-    select = Mock(return_value=ports)
-    count = Mock(return_value=counts)
+    report = ListeningPortReport(sockets=ports, counts=counts, services=[])
+    collect = Mock(return_value=report)
     header = Mock()
     display_counts = Mock()
     display_ports = Mock()
-    monkeypatch.setattr(main.network, "get_listening_sockets", collect)
-    monkeypatch.setattr(main.parsers, "parse_ss_output", parse)
-    monkeypatch.setattr(main.analysis, "get_open_ports", select)
-    monkeypatch.setattr(main.analysis, "count_open_ports", count)
+    monkeypatch.setattr(main.diagnostic_service, "get_listening_ports", collect)
     monkeypatch.setattr(main.output, "display_open_ports_header", header)
     monkeypatch.setattr(main.output, "display_open_ports_count", display_counts)
     monkeypatch.setattr(main.output, "display_open_ports", display_ports)
@@ -242,9 +252,6 @@ def test_main_displays_listening_socket_counts_and_rows(user_input, monkeypatch)
 
     assert user_input.call_count == 4
     collect.assert_called_once_with()
-    parse.assert_called_once_with(raw)
-    select.assert_called_once_with(parsed)
-    count.assert_called_once_with(ports)
     header.assert_called_once_with()
     display_counts.assert_called_once_with(counts)
     display_ports.assert_called_once_with(ports)
@@ -252,56 +259,79 @@ def test_main_displays_listening_socket_counts_and_rows(user_input, monkeypatch)
 
 def test_main_displays_port_service_suggestions(user_input, monkeypatch):
     user_input.side_effect = ["3", "2", "3", "5"]
-    raw = ["tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"]
-    ports = [ListeningSocket(
-        protocol="TCP",
-        state="LISTEN",
-        local_address="0.0.0.0",
-        local_port="22",
-        peer_address="0.0.0.0",
-        peer_port="*",
-    )]
     services = [ServiceInfo(protocol="TCP", local_address="0.0.0.0", port=22, service_name="SSH")]
-    collect = Mock(return_value=raw)
-    analyze = Mock(return_value=services)
+    report = ListeningPortReport(sockets=[ListeningSocket(protocol="TCP")], services=services)
+    collect = Mock(return_value=report)
     display = Mock()
-    monkeypatch.setattr(main.network, "get_listening_sockets", collect)
-    monkeypatch.setattr(main.analysis, "analyze_open_ports", analyze)
+    monkeypatch.setattr(main.diagnostic_service, "get_listening_ports", collect)
     monkeypatch.setattr(main.output, "display_known_services", display)
 
     main.main()
 
     assert user_input.call_count == 4
     collect.assert_called_once_with()
-    analyze.assert_called_once_with(ports)
     display.assert_called_once_with(services)
+
+
+def test_main_integrates_socket_listing_and_service_suggestions(user_input, subprocess_run, capsys):
+    user_input.side_effect = ["3", "1", "2", "3", "5"]
+    raw = "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nudp UNCONN 0 0 0.0.0.0:68 0.0.0.0:*\n"
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, raw, "")
+
+    main.main()
+
+    text = capsys.readouterr().out
+    assert "Total 1 listening TCP sockets" in text
+    assert "Total 1 unconnected UDP sockets" in text
+    assert "SSH" in text
+    assert "DHCP client" in text
+    assert subprocess_run.call_count == 2
 
 
 def test_main_displays_system_routing_snapshot(user_input, monkeypatch):
     user_input.side_effect = ["4", "1", "3", "5"]
     routes = ["default via 192.0.2.1 dev enp3s0 src 192.0.2.10"]
-    collect = Mock(return_value=routes)
-    hostname = Mock(return_value="workstation")
-    interface = Mock(return_value="enp3s0")
-    address = Mock(return_value="192.0.2.10")
-    gateway = Mock(return_value="192.0.2.1")
+    snapshot = RoutingSnapshot(
+        hostname="workstation", interface="enp3s0", ip_address="192.0.2.10",
+        gateway="192.0.2.1", routes=routes,
+    )
+    collect = Mock(return_value=snapshot)
     display = Mock()
-    monkeypatch.setattr(main.network, "get_ip_route", collect)
-    monkeypatch.setattr(main.network, "get_hostname", hostname)
-    monkeypatch.setattr(main.network, "get_nic", interface)
-    monkeypatch.setattr(main.network, "get_ip", address)
-    monkeypatch.setattr(main.network, "get_gateway", gateway)
+    display_error = Mock()
+    monkeypatch.setattr(main.diagnostic_service, "get_routing_snapshot", collect)
     monkeypatch.setattr(main.output, "display_routing_table", display)
+    monkeypatch.setattr(main.output, "display_command_error", display_error)
 
     main.main()
 
     assert user_input.call_count == 4
     collect.assert_called_once_with()
-    hostname.assert_called_once_with()
-    interface.assert_called_once_with(routes)
-    address.assert_called_once_with(routes)
-    gateway.assert_called_once_with(routes)
     display.assert_called_once_with("workstation", "enp3s0", "192.0.2.10", "192.0.2.1", routes)
+    display_error.assert_not_called()
+
+
+def test_main_displays_partial_routing_snapshot_and_each_error_once(user_input, monkeypatch):
+    user_input.side_effect = ["4", "1", "3", "5"]
+    message = "Invalid default route interface: Invalid interface name: '-f'"
+    snapshot = RoutingSnapshot(
+        hostname=None, gateway="192.0.2.1", routes=["default via 192.0.2.1 dev -f"],
+        errors={"hostname": "hostname failed", "interface": message, "ip_address": message},
+    )
+    calls = Mock()
+    monkeypatch.setattr(main.diagnostic_service, "get_routing_snapshot", Mock(return_value=snapshot))
+    monkeypatch.setattr(main.output, "display_routing_table", calls.table)
+    monkeypatch.setattr(main.output, "display_command_error", calls.error)
+
+    main.main()
+
+    assert calls.mock_calls == [
+        call.table(None, None, None, "192.0.2.1", ["default via 192.0.2.1 dev -f"]),
+        call.error("hostname failed"),
+        call.error(message),
+    ]
+    assert user_input.call_count == 4
+    assert main.output.mainmenu1.call_count == 2
 
 
 def test_main_displays_networkmanager_interfaces(user_input, monkeypatch):
@@ -315,7 +345,7 @@ def test_main_displays_networkmanager_interfaces(user_input, monkeypatch):
     )]
     collect = Mock(return_value=raw)
     display = Mock()
-    monkeypatch.setattr(main.network, "nmcli_status", collect)
+    monkeypatch.setattr(main.diagnostic_service.network, "nmcli_status", collect)
     monkeypatch.setattr(main.output, "display_network_interface_status", display)
 
     main.main()
@@ -332,7 +362,7 @@ def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeyp
     user_input.side_effect = ["1", "5", "5"]
     status = Mock(side_effect=[error_type("nmcli unavailable"), False])
     display = Mock()
-    monkeypatch.setattr(main.network, "get_network_plugin", status)
+    monkeypatch.setattr(main.diagnostic_service, "get_connection_status", status)
     monkeypatch.setattr(main.output, "display_command_error", display)
 
     main.main()
@@ -342,27 +372,27 @@ def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeyp
     assert main.output.mainmenu1.call_args_list == [call(None), call(False)]
 
 
-@pytest.mark.parametrize("menu, action, module, function_name", [
-    ("1", "1", main.ping, "run_ping_diagnostic"),
-    ("2", "1", main.dns, "dns_query"),
-    ("2", "2", main.dns, "dns_latency"),
-    ("2", "3", main.dns, "ipv_check"),
-    ("3", "1", main.network, "get_listening_sockets"),
-    ("3", "2", main.network, "get_listening_sockets"),
-    ("4", "1", main.network, "get_ip_route"),
-    ("4", "2", main.network, "nmcli_status"),
+@pytest.mark.parametrize("menu, action, function_name", [
+    ("1", "1", "run_ping_diagnostic"),
+    ("2", "1", "run_dns_query"),
+    ("2", "2", "run_dns_latency_test"),
+    ("2", "3", "lookup_ip_addresses"),
+    ("3", "1", "get_listening_ports"),
+    ("3", "2", "get_listening_ports"),
+    ("4", "1", "get_routing_snapshot"),
+    ("4", "2", "get_network_interfaces"),
 ])
 @pytest.mark.parametrize("error_type", [
     CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError,
     ParsingError, DiagnosticError,
 ])
 def test_main_returns_to_main_menu_after_diagnostic_error(
-    menu, action, module, function_name, error_type, user_input, monkeypatch,
+    menu, action, function_name, error_type, user_input, monkeypatch,
 ):
     user_input.side_effect = [menu, action, "5"]
     diagnostic = Mock(side_effect=error_type("diagnostic failed"))
     display = Mock()
-    monkeypatch.setattr(module, function_name, diagnostic)
+    monkeypatch.setattr(main.diagnostic_service, function_name, diagnostic)
     monkeypatch.setattr(main.output, "display_command_error", display)
 
     main.main()
@@ -389,17 +419,23 @@ def test_script_entry_displays_exit_message_after_exit_or_interruption(
     user_input.assert_not_called()
 
 
-def test_main_displays_snapshot_without_default_route(user_input, monkeypatch):
+def test_main_displays_snapshot_without_default_route(user_input, subprocess_run, monkeypatch):
     user_input.side_effect = ["4", "1", "3", "5"]
+    responses = {
+        "ip": subprocess.CompletedProcess([], 0, "", ""),
+        "hostname": subprocess.CompletedProcess([], 0, "workstation\n", ""),
+    }
+    subprocess_run.side_effect = lambda arguments, **kwargs: responses[arguments[0]]
     display = Mock()
-    monkeypatch.setattr(main.network, "get_ip_route", Mock(return_value=[]))
-    monkeypatch.setattr(main.network, "get_hostname", Mock(return_value="workstation"))
+    display_error = Mock()
     monkeypatch.setattr(main.output, "display_routing_table", display)
+    monkeypatch.setattr(main.output, "display_command_error", display_error)
 
     main.main()
 
     assert user_input.call_count == 4
     display.assert_called_once_with("workstation", None, None, None, [])
+    display_error.assert_not_called()
 
 
 @pytest.mark.parametrize("error, message", [
@@ -408,17 +444,27 @@ def test_main_displays_snapshot_without_default_route(user_input, monkeypatch):
     (OSError("Permission denied"), "Could not execute ip: Permission denied"),
 ])
 def test_main_recovers_from_real_runner_errors(error, message, user_input, subprocess_run, monkeypatch):
-    user_input.side_effect = ["4", "1", "5"]
-    subprocess_run.side_effect = error
+    # The hostname does not depend on the routing table and is still displayed.
+    user_input.side_effect = ["4", "1", "3", "5"]
+
+    def respond(arguments, **kwargs):
+        if arguments[0] == "ip":
+            raise error
+        return subprocess.CompletedProcess([], 0, "workstation\n", "")
+
+    subprocess_run.side_effect = respond
     display = Mock()
+    display_table = Mock()
     monkeypatch.setattr(main.output, "display_command_error", display)
+    monkeypatch.setattr(main.output, "display_routing_table", display_table)
 
     main.main()
 
-    assert user_input.call_count == 3
+    assert user_input.call_count == 4
     assert main.output.mainmenu1.call_count == 2
     display.assert_called_once_with(message)
-    subprocess_run.assert_called_once()
+    display_table.assert_called_once_with("workstation", None, None, None, None)
+    assert [item.args[0] for item in subprocess_run.call_args_list] == [["ip", "-4", "route"], ["hostname"]]
 
 
 @pytest.mark.parametrize("fixture_name, returncode, received, loss, latency, variation", [
@@ -546,14 +592,14 @@ def test_main_can_run_another_diagnostic_after_raised_command_error(user_input, 
     ping_diagnostic = Mock(return_value=report)
     display_error = Mock()
     display_report = Mock()
-    monkeypatch.setattr(main.dns, "dns_query", query)
-    monkeypatch.setattr(main.ping, "run_ping_diagnostic", ping_diagnostic)
+    monkeypatch.setattr(main.diagnostic_service, "run_dns_query", query)
+    monkeypatch.setattr(main.diagnostic_service, "run_ping_diagnostic", ping_diagnostic)
     monkeypatch.setattr(main.output, "display_command_error", display_error)
     monkeypatch.setattr(main.output, "display_ping_report", display_report)
 
     main.main()
 
-    query.assert_called_once_with("google.com")
+    query.assert_called_once_with()
     display_error.assert_called_once_with("getent unavailable")
     ping_diagnostic.assert_called_once_with("localhost")
     display_report.assert_called_once_with(report)
@@ -561,7 +607,7 @@ def test_main_can_run_another_diagnostic_after_raised_command_error(user_input, 
 
 
 def test_main_reports_invalid_route_interface_without_address_command(user_input, subprocess_run, capsys):
-    user_input.side_effect = ["4", "1", "5"]
+    user_input.side_effect = ["4", "1", "3", "5"]
     responses = {
         "ip": subprocess.CompletedProcess([], 0, "default via 192.0.2.1 dev -f\n", ""),
         "hostname": subprocess.CompletedProcess([], 0, "workstation\n", ""),
@@ -571,8 +617,12 @@ def test_main_reports_invalid_route_interface_without_address_command(user_input
     main.main()
 
     output = capsys.readouterr().out
-    assert "Error: Invalid default route interface: Invalid interface name: '-f'" in output
-    assert user_input.call_count == 3
+    assert output.count("Error: Invalid default route interface: Invalid interface name: '-f'") == 1
+    # The hostname and gateway do not depend on the invalid interface name.
+    assert "Hostname : workstation" in output
+    assert "Gateway  : 192.0.2.1" in output
+    assert "Interface: Unavailable" in output
+    assert user_input.call_count == 4
     assert main.output.mainmenu1.call_count == 2
     assert [item.args[0] for item in subprocess_run.call_args_list] == [
         ["ip", "-4", "route"], ["hostname"],
@@ -602,7 +652,7 @@ def test_main_reports_invalid_socket_line_instead_of_partial_service_list(
 
 
 def test_main_reports_invalid_route_source_address_as_controlled_error(user_input, subprocess_run, capsys):
-    user_input.side_effect = ["4", "1", "5"]
+    user_input.side_effect = ["4", "1", "3", "5"]
     responses = {
         "ip": subprocess.CompletedProcess([], 0, "default via 192.0.2.1 dev enp3s0 src not-an-address\n", ""),
         "hostname": subprocess.CompletedProcess([], 0, "workstation\n", ""),
@@ -613,7 +663,7 @@ def test_main_reports_invalid_route_source_address_as_controlled_error(user_inpu
 
     output = capsys.readouterr().out
     assert "Error: Invalid default route source address: Invalid IPv4 address: 'not-an-address'" in output
-    assert "not-an-address" not in output.replace(
-        "Invalid IPv4 address: 'not-an-address'", "",
-    )
-    assert user_input.call_count == 3
+    # The raw route line is part of the routing table; the parsed IP is not shown.
+    assert "IP       : Unavailable" in output
+    assert "Interface: enp3s0" in output
+    assert user_input.call_count == 4

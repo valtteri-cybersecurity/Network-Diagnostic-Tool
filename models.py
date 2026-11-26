@@ -66,6 +66,8 @@ class DnsLatencyResult:
     dns_latency_ms: Optional[float] = None
     answer_count: Optional[int] = None
     error: Optional[str] = None
+    # Filled by the service layer only when a latency was measured.
+    latency_analysis: Optional["LatencyAnalysis"] = None
 
 
 @dataclass
@@ -113,3 +115,27 @@ class NetworkInterface:
 class LatencyAnalysis:
     latency_ms: float
     status: str
+
+
+@dataclass
+class ListeningPortReport:
+    """Listening TCP and unconnected UDP sockets from one `ss` run."""
+    sockets: list[ListeningSocket] = field(default_factory=list)
+    counts: SocketCounts = field(default_factory=SocketCounts)
+    services: list[ServiceInfo] = field(default_factory=list)
+
+
+@dataclass
+class RoutingSnapshot:
+    """Hostname and default-route details with errors of the parts that failed.
+
+    `routes` is None when the routing table could not be read and an empty list
+    when it has no routes. `errors` maps a field name to its error message; a
+    field with an error, or one depending on an unavailable routing table, is None.
+    """
+    hostname: Optional[str] = None
+    interface: Optional[str] = None
+    ip_address: Optional[str] = None
+    gateway: Optional[str] = None
+    routes: Optional[list[str]] = None
+    errors: dict[str, str] = field(default_factory=dict)

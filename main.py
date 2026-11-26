@@ -1,9 +1,5 @@
-import analysis
-import dns
-import network
+import diagnostic_service
 import output
-import parsers
-import ping
 
 from exceptions import DiagnosticError
 
@@ -24,13 +20,22 @@ def read_menu_choice(max_choice):
         output.display_menu_error(max_choice)
 
 
+def display_errors(messages):
+    """Display each distinct error message once, in order."""
+    shown = []
+    for message in messages:
+        if message not in shown:
+            output.display_command_error(message)
+            shown.append(message)
+
+
 def main():
     output.clear_screen()
 
     while True:
         try:
             try:
-                network_connected = network.get_network_plugin()
+                network_connected = diagnostic_service.get_connection_status()
             except DiagnosticError as error:
                 output.display_command_error(str(error))
                 network_connected = None
@@ -60,7 +65,7 @@ def main():
                     }
 
                     output.clear_screen()
-                    report = ping.run_ping_diagnostic(targets[submenu_choice])
+                    report = diagnostic_service.run_ping_diagnostic(targets[submenu_choice])
                     output.display_ping_report(report)
 
             elif choice == 2:
@@ -75,31 +80,15 @@ def main():
                     output.clear_screen()
 
                     if submenu_choice == 1:
-                        result = dns.dns_query("google.com")
+                        result = diagnostic_service.run_dns_query()
                         output.dns_query_output(result)
 
                     elif submenu_choice == 2:
-                        result = dns.dns_latency("google.com")
-
-                        latency_analysis = None
-                        if result.dns_latency_ms is not None:
-                            latency_analysis = analysis.dns_latency_analyzation(result)
-
-                        output.dns_latency_output(result, latency_analysis)
+                        result = diagnostic_service.run_dns_latency_test()
+                        output.dns_latency_output(result, result.latency_analysis)
 
                     elif submenu_choice == 3:
-                        sites = [
-                            "google.com",
-                            "wikipedia.com",
-                            "example.com",
-                            "yle.fi"
-                        ]
-
-                        results = [
-                            dns.ipv_check(site)
-                            for site in sites
-                        ]
-
+                        results = diagnostic_service.lookup_ip_addresses()
                         output.ipv_check_results_output(results)
 
             elif choice == 3:
@@ -113,20 +102,15 @@ def main():
 
                     output.clear_screen()
 
-                    raw = network.get_listening_sockets()
-                    data = parsers.parse_ss_output(raw)
-                    open_port_data = analysis.get_open_ports(data)
+                    report = diagnostic_service.get_listening_ports()
 
                     if submenu_choice == 1:
-                        counts = analysis.count_open_ports(open_port_data)
-
                         output.display_open_ports_header()
-                        output.display_open_ports_count(counts)
-                        output.display_open_ports(open_port_data)
+                        output.display_open_ports_count(report.counts)
+                        output.display_open_ports(report.sockets)
 
                     elif submenu_choice == 2:
-                        services = analysis.analyze_open_ports(open_port_data)
-                        output.display_known_services(services)
+                        output.display_known_services(report.services)
 
             elif choice == 4:
                 while True:
@@ -140,20 +124,19 @@ def main():
                     output.clear_screen()
 
                     if submenu_choice == 1:
-                        route_data = network.get_ip_route()
+                        snapshot = diagnostic_service.get_routing_snapshot()
 
                         output.display_routing_table(
-                            network.get_hostname(),
-                            network.get_nic(route_data),
-                            network.get_ip(route_data),
-                            network.get_gateway(route_data),
-                            route_data
+                            snapshot.hostname,
+                            snapshot.interface,
+                            snapshot.ip_address,
+                            snapshot.gateway,
+                            snapshot.routes
                         )
+                        display_errors(snapshot.errors.values())
 
                     elif submenu_choice == 2:
-                        results = network.nmcli_status()
-                        interface_data = parsers.parse_nmcli_output(results)
-
+                        interface_data = diagnostic_service.get_network_interfaces()
                         output.display_network_interface_status(interface_data)
 
         except DiagnosticError as error:

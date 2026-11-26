@@ -242,18 +242,20 @@ def dns_latency_output(result: DnsLatencyResult, analysis: Optional[LatencyAnaly
 def ipv_check_output(result: DnsAddressResult):
     print(f"Hostname : {result.hostname or 'Unknown'}")
     print(f"Execution: {result.execution_status.value}")
+    # An empty list is a negative answer only when the lookup completed.
+    empty = "None found" if result.execution_status is ExecutionStatus.COMPLETED else "Unavailable"
     if result.ipv4_addresses:
         print("IPv4 addresses:")
         for address in result.ipv4_addresses:
             print(f"  - {address}")
     else:
-        print("IPv4 addresses: None found")
+        print(f"IPv4 addresses: {empty}")
     if result.ipv6_addresses:
         print("IPv6 addresses:")
         for address in result.ipv6_addresses:
             print(f"  - {address}")
     else:
-        print("IPv6 addresses: None found")
+        print(f"IPv6 addresses: {empty}")
     if result.error is not None:
         print(f"Error    : {result.error}")
     print()

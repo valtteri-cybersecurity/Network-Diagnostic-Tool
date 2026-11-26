@@ -313,12 +313,28 @@ def test_ipv_check_output_lists_available_families_and_missing_addresses(ipv4, i
 
 
 def test_ipv_check_output_handles_missing_fields(capsys):
+    # The default execution status is FAILED, so the empty lists are unknown.
     output.ipv_check_output(DnsAddressResult())
 
     text = capsys.readouterr().out
     assert "Hostname : Unknown" in text
-    assert "IPv4 addresses: None found" in text
-    assert "IPv6 addresses: None found" in text
+    assert "IPv4 addresses: Unavailable" in text
+    assert "IPv6 addresses: Unavailable" in text
+    assert "None found" not in text
+
+
+@pytest.mark.parametrize("status", [ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT])
+def test_ipv_check_output_does_not_report_failed_lookup_as_no_addresses(status, capsys):
+    report = DnsAddressResult("example.com", status, error="getent timed out after 10 seconds.")
+
+    output.ipv_check_output(report)
+
+    text = capsys.readouterr().out
+    assert f"Execution: {status.value}" in text
+    assert "IPv4 addresses: Unavailable" in text
+    assert "IPv6 addresses: Unavailable" in text
+    assert "None found" not in text
+    assert "Error    : getent timed out after 10 seconds." in text
 
 
 def test_ipv_check_results_output_prints_each_site_in_order(capsys):

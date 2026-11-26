@@ -155,3 +155,93 @@ def test_parsers_are_pure_and_independent_of_commands_and_ui(subprocess_run, sys
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+ROOT = Path(__file__).parent.parent
+ENGINE_NAMES = [
+    "models", "exceptions", "validation", "parsers", "command_runner", "network", "analysis",
+    "dns", "ping",
+]
+
+
+def imported_modules(file_name):
+    import ast
+
+    imported = set()
+    tree = ast.parse((ROOT / file_name).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module.split(".")[0])
+    return imported
+
+
+def test_service_layer_depends_only_on_engine_modules():
+    imported = imported_modules("diagnostic_service.py")
+
+    assert imported <= set(ENGINE_NAMES) | {"typing"}
+    for forbidden in ("main", "output", "PySide6", "subprocess", "os", "command_runner"):
+        assert forbidden not in imported
+
+
+def test_service_layer_does_not_print_prompt_or_run_processes():
+    import ast
+
+    tree = ast.parse((ROOT / "diagnostic_service.py").read_text(encoding="utf-8"))
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+    assert not {"print", "input", "exec", "eval"} & names
+    assert not {"run", "Popen", "system", "check_output"} & attributes
+    assert not any(isinstance(node, ast.Global) for node in ast.walk(tree))
+
+
+@pytest.mark.parametrize("name", ENGINE_NAMES)
+def test_engine_does_not_depend_on_service_layer_or_cli(name):
+    imported = imported_modules(f"{name}.py")
+
+    assert "diagnostic_service" not in imported
+    assert "main" not in imported
+    assert "output" not in imported
+
+
+def test_cli_uses_service_layer_instead_of_engine_modules():
+    imported = imported_modules("main.py")
+
+    assert imported == {"diagnostic_service", "output", "exceptions"}
+
+
+def test_service_layer_import_runs_no_commands_and_works_without_ui_modules(
+    monkeypatch, subprocess_run, system_command, capsys,
+):
+    read_input = Mock(side_effect=AssertionError("Service layer must not request input"))
+    monkeypatch.setattr("builtins.input", read_input)
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = __import__("subprocess").CompletedProcess(
+        [], 0, "enp3s0:connected\nlo:connected (externally)\n", "",
+    )
+
+    with patch.dict(sys.modules):
+        for name in ENGINE_NAMES + ["diagnostic_service"]:
+            sys.modules.pop(name, None)
+        for name in ("main", "output", "PySide6"):
+            sys.modules[name] = None
+
+        service = importlib.import_module("diagnostic_service")
+
+        subprocess_run.assert_not_called()
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+        assert service.get_connection_status() is True
+        with pytest.raises(sys.modules["exceptions"].ValidationError):
+            service.lookup_ip_addresses(["-f"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    read_input.assert_not_called()
+    subprocess_run.assert_called_once()
+    system_command.assert_not_called()
