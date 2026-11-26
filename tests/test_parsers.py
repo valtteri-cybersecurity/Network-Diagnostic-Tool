@@ -881,3 +881,114 @@ def test_parse_nmcli_output_rejects_unrecognized_line_instead_of_partial_list(li
 def test_parse_nmcli_states_rejects_unrecognized_line(output):
     with parsing_error("Unrecognized line in nmcli output"):
         parsers.parse_nmcli_states(output)
+
+
+# --- Phase 14 regressions: bounded numeric output ----------------------------
+
+
+@pytest.mark.parametrize("field", ["sent", "received", "icmp_errors"])
+@pytest.mark.parametrize("digits", [129, 5000])
+def test_parse_ping_statistics_rejects_oversized_count_tokens(field, digits):
+    values = {"sent": "3", "received": "3", "icmp_errors": "0"}
+    values[field] = "0" * (digits - 1) + "3"
+    summary = (
+        f"{values['sent']} packets transmitted, {values['received']} received, "
+        f"+{values['icmp_errors']} errors, 0% packet loss\n"
+    )
+
+    with parsing_error("Unable to parse packet statistics"):
+        parsers.parse_ping_statistics(summary + RTT, "internet")
+
+
+def test_parse_ping_statistics_accepts_count_token_length_boundary():
+    one = "0" * 127 + "1"
+    zero = "0" * 128
+    summary = f"{one} packets transmitted, {one} received, +{zero} errors, 0% packet loss\n"
+
+    result = parsers.parse_ping_statistics(summary + RTT, "internet")
+
+    assert result.packets_sent == result.packets_received == 1
+    assert result.icmp_errors == 0
+    assert result.packet_loss_percent == 0.0
+
+
+@pytest.mark.parametrize("position", [0, 1, 2, 3])
+@pytest.mark.parametrize("token", ["9" * 309, "0." + "0" * 1023], ids=["infinite", "overlong"])
+def test_parse_ping_statistics_rejects_overflowing_or_oversized_rtt(position, token):
+    values = ["10", "12.5", "15", "2"]
+    values[position] = token
+    output = SUMMARY + "rtt min/avg/max/mdev = " + "/".join(values) + " ms\n"
+
+    with parsing_error("Unable to parse latency statistics"):
+        parsers.parse_ping_statistics(output, "internet")
+
+
+@pytest.mark.parametrize("token", ["9" * 309, "0." + "0" * 1023], ids=["infinite", "overlong"])
+def test_parse_ping_statistics_rejects_overflowing_or_oversized_loss(token):
+    summary = f"3 packets transmitted, 3 received, {token}% packet loss\n"
+
+    with parsing_error("Unable to parse packet statistics"):
+        parsers.parse_ping_statistics(summary + RTT, "internet")
+
+
+def test_parse_ping_statistics_accepts_decimal_token_length_boundary():
+    zero = "0." + "0" * 1022
+    summary = f"3 packets transmitted, 3 received, {zero}% packet loss\n"
+    output = summary + f"rtt min/avg/max/mdev = {zero}/{zero}/{zero}/{zero} ms\n"
+
+    result = parsers.parse_ping_statistics(output, "localhost")
+
+    assert result.packet_loss_percent == 0.0
+    assert (result.min_rtt_ms, result.avg_rtt_ms, result.max_rtt_ms, result.mdev_ms) == (0.0, 0.0, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("digits", [129, 5000])
+def test_parse_dig_output_rejects_oversized_answer_count(digits):
+    answer = "0" * (digits - 1) + "1"
+    output = f";; status: NOERROR,\n;; ANSWER: {answer},\n;; Query time: 0 msec\n"
+
+    with parsing_error("Invalid DNS answer count"):
+        parsers.parse_dig_output(output, "example.com")
+
+
+def test_parse_dig_output_accepts_answer_count_length_boundary():
+    answer = "0" * 127 + "1"
+    output = f";; status: NOERROR,\n;; ANSWER: {answer},\n;; Query time: 0 msec\n"
+
+    result = parsers.parse_dig_output(output, "example.com")
+
+    assert result.answer_count == 1
+    assert result.resolved is True
+
+
+@pytest.mark.parametrize("token", ["9" * 309, "0." + "0" * 1023], ids=["infinite", "overlong"])
+def test_parse_dig_output_rejects_overflowing_or_oversized_query_time(token):
+    output = f";; status: NOERROR,\n;; ANSWER: 1,\n;; Query time: {token} msec\n"
+
+    with parsing_error("Invalid DNS query time"):
+        parsers.parse_dig_output(output, "example.com")
+
+
+def test_parse_dig_output_accepts_query_time_length_boundary():
+    zero = "0." + "0" * 1022
+    output = f";; status: NOERROR,\n;; ANSWER: 1,\n;; Query time: {zero} msec\n"
+
+    result = parsers.parse_dig_output(output, "example.com")
+
+    assert result.dns_latency_ms == 0.0
+    assert result.answer_count == 1
+
+
+@pytest.mark.parametrize("digits", [129, 5000])
+def test_select_default_route_rejects_oversized_metric(digits):
+    metric = "0" * (digits - 1) + "1"
+
+    with parsing_error("Invalid default route metric"):
+        parsers.select_default_route([f"default dev enp3s0 metric {metric}"])
+
+
+@pytest.mark.parametrize("metric", ["0" * 127 + "1", "4294967295"])
+def test_select_default_route_accepts_metric_boundaries(metric):
+    route = f"default via 192.0.2.1 dev enp3s0 metric {metric}"
+
+    assert parsers.select_default_route([route]) == route.split()

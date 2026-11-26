@@ -201,7 +201,7 @@ def test_parsers_are_pure_and_independent_of_commands_and_ui(subprocess_run, sys
         parsers.parse_ping_statistics("", "internet")
 
     assert imported == {
-        "ipaddress", "re", "typing",
+        "ipaddress", "math", "re", "typing",
         f"{CORE}.exceptions", f"{CORE}.models", f"{CORE}.validation",
     }
     subprocess_run.assert_not_called()
@@ -336,3 +336,17 @@ def test_service_layer_exposes_the_public_functions():
         "lookup_ip_addresses", "get_listening_ports", "get_routing_snapshot", "get_network_interfaces",
     ):
         assert callable(getattr(diagnostic_service, name))
+
+
+def test_snapshot_models_are_data_only_and_independent_of_execution_and_ui():
+    imported = imported_modules(f"{CORE}.models")
+
+    assert imported == {"dataclasses", "datetime", "enum", "math", "re", "typing", "uuid"}
+    assert not any(name.startswith("network_diagnostic") for name in imported)
+    for forbidden in ("subprocess", "os", "socket", "http", "urllib", "ssl", "PySide6", CLI):
+        assert forbidden not in imported
+    tree = ast.parse(package_modules()[f"{CORE}.models"].read_text(encoding="utf-8"))
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    assert not {"print", "input", "exec", "eval", "open", "__import__"} & names
+    assert not {"run", "Popen", "system", "check_output", "call", "connect"} & attributes

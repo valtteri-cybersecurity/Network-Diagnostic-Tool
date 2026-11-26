@@ -7,6 +7,7 @@ measurement is returned as None, never as zero.
 """
 
 import ipaddress
+import math
 import re
 from typing import Callable, Optional
 
@@ -17,6 +18,9 @@ from network_diagnostic.core.validation import validate_interface_name, validate
 
 MAX_PORT = 65535
 MAX_ROUTE_METRIC = 4294967295
+# Bound numeric conversion work, including tokens padded with leading zeros.
+MAX_COUNT_DIGITS = 128
+MAX_DECIMAL_TOKEN_LENGTH = 1024
 _ROUTE_KEYWORDS = ("via", "dev", "src", "metric")
 # Ping prints loss rounded (%g in iputils, %.1f on macOS) or truncated to an
 # integer (BusyBox). Any difference below one percentage point is rounding.
@@ -32,17 +36,20 @@ _DIG_QUERY_TIME = re.compile(r"Query time:([^\n]*)")
 _DIG_QUERY_TIME_VALUE = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?)\s*msec\s*")
 
 
-def _parse_count(text: str) -> int:
-    if not _COUNT.fullmatch(text):
-        raise ParsingError("Unable to parse packet statistics")
+def _parse_count(text: str, message: str = "Unable to parse packet statistics") -> int:
+    if len(text) > MAX_COUNT_DIGITS or not _COUNT.fullmatch(text):
+        raise ParsingError(message)
     return int(text)
 
 
 def _parse_non_negative_number(text: str, message: str) -> float:
     # The pattern rejects signs, exponents, NaN and infinity before float().
-    if not _NON_NEGATIVE_NUMBER.fullmatch(text):
+    if len(text) > MAX_DECIMAL_TOKEN_LENGTH or not _NON_NEGATIVE_NUMBER.fullmatch(text):
         raise ParsingError(message)
-    return float(text)
+    value = float(text)
+    if not math.isfinite(value):
+        raise ParsingError(message)
+    return value
 
 
 def _validated(validator: Callable[[str], None], value: str, description: str) -> str:
@@ -224,9 +231,7 @@ def parse_dig_output(output: str, hostname: str) -> DnsLatencyResult:
     answer_count = None
     answer_text = _single_value(_DIG_ANSWER, output, "answer count")
     if answer_text is not None:
-        if not _COUNT.fullmatch(answer_text):
-            raise ParsingError("Invalid DNS answer count")
-        answer_count = int(answer_text)
+        answer_count = _parse_count(answer_text, "Invalid DNS answer count")
 
     latency = None
     time_text = _single_value(_DIG_QUERY_TIME, output, "query time")
@@ -234,7 +239,7 @@ def parse_dig_output(output: str, hostname: str) -> DnsLatencyResult:
         match = _DIG_QUERY_TIME_VALUE.fullmatch(time_text)
         if match is None:
             raise ParsingError("Invalid DNS query time")
-        latency = float(match.group(1))
+        latency = _parse_non_negative_number(match.group(1), "Invalid DNS query time")
 
     resolved = None
     if status != "NOERROR":
@@ -444,9 +449,9 @@ def select_default_route(route_lines: list[str]) -> Optional[list[str]]:
         metric = 0
         if "metric" in parts:
             text = parts[parts.index("metric") + 1]
-            if not _COUNT.fullmatch(text) or int(text) > MAX_ROUTE_METRIC:
+            metric = _parse_count(text, "Invalid default route metric")
+            if metric > MAX_ROUTE_METRIC:
                 raise ParsingError("Invalid default route metric")
-            metric = int(text)
 
         if selected is None or metric < selected_metric:
             selected = parts
