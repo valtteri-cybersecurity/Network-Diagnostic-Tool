@@ -5,19 +5,29 @@ for a rejected value. Values are never converted or corrected silently.
 """
 
 import ipaddress
-import math
 import re
 
 from exceptions import ValidationError
 
 
 MAX_HOSTNAME_LENGTH = 253
+MAX_TIMEOUT_SECONDS = 60
+MAX_SHOWN_LENGTH = 64
 
 _HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _DECIMAL_OCTET = re.compile(r"0|[1-9][0-9]{0,2}")
-_DIGITS_AND_DOTS = re.compile(r"[0-9.]+")
+# A decimal, octal or hexadecimal part accepted by inet_aton(), such as 127 or 0x7f.
+_NUMERIC_LABEL = re.compile(r"0[xX][0-9A-Fa-f]*|[0-9]+")
 _INTERFACE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 _IPV6_CHARACTERS = re.compile(r"[0-9A-Fa-f:.]+")
+
+
+def _shown(value: str) -> str:
+    """Return at most MAX_SHOWN_LENGTH characters of value with escaped control characters."""
+    shown = repr(value[:MAX_SHOWN_LENGTH])
+    if len(value) > MAX_SHOWN_LENGTH:
+        shown += "..."
+    return shown
 
 
 def _is_ipv4_address(value: str) -> bool:
@@ -53,11 +63,14 @@ def _is_hostname(value: str) -> bool:
     if not name or len(name) > MAX_HOSTNAME_LENGTH:
         return False
 
-    # Values made only of digits and dots must be valid IPv4 literals instead.
-    if _DIGITS_AND_DOTS.fullmatch(name):
+    labels = name.split(".")
+
+    # Names made only of numeric parts, such as 999.1.2.3 or 0x7f.1, would be read
+    # as alternative IPv4 forms by the resolver. They must be valid IPv4 literals.
+    if all(_NUMERIC_LABEL.fullmatch(label) for label in labels):
         return False
 
-    for label in name.split("."):
+    for label in labels:
         if not _HOSTNAME_LABEL.fullmatch(label):
             return False
 
@@ -70,7 +83,7 @@ def validate_host(value: str) -> None:
         raise ValidationError("host must be a string")
 
     if value[:1] in ("-", "+", "@"):
-        raise ValidationError(f"Invalid host: {value!r} looks like a command option")
+        raise ValidationError(f"Invalid host: {_shown(value)} looks like a command option")
 
     if ":" in value:
         if _is_ipv6_address(value):
@@ -78,7 +91,7 @@ def validate_host(value: str) -> None:
     elif _is_ipv4_address(value) or _is_hostname(value):
         return
 
-    raise ValidationError(f"Invalid host: {value!r}")
+    raise ValidationError(f"Invalid host: {_shown(value)}")
 
 
 def validate_ipv4_address(value: str) -> None:
@@ -87,7 +100,7 @@ def validate_ipv4_address(value: str) -> None:
         raise ValidationError("IPv4 address must be a string")
 
     if not _is_ipv4_address(value):
-        raise ValidationError(f"Invalid IPv4 address: {value!r}")
+        raise ValidationError(f"Invalid IPv4 address: {_shown(value)}")
 
 
 def validate_interface_name(value: str) -> None:
@@ -100,7 +113,7 @@ def validate_interface_name(value: str) -> None:
         or value.startswith("-")
         or value in (".", "..")
     ):
-        raise ValidationError(f"Invalid interface name: {value!r}")
+        raise ValidationError(f"Invalid interface name: {_shown(value)}")
 
 
 def validate_command_arguments(arguments: list[str]) -> None:
@@ -118,14 +131,14 @@ def validate_command_arguments(arguments: list[str]) -> None:
 
 
 def validate_timeout(timeout: float) -> None:
-    """Accept a positive, finite int or float. Booleans are rejected."""
+    """Accept an int or float greater than 0 and at most MAX_TIMEOUT_SECONDS.
+
+    Booleans are rejected. The comparison also rejects NaN, infinities and very
+    large integers without converting them to float.
+    """
+    message = f"timeout must be a positive number of at most {MAX_TIMEOUT_SECONDS} seconds"
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-        raise ValidationError("timeout must be a finite positive number")
+        raise ValidationError(message)
 
-    try:
-        value = float(timeout)
-    except OverflowError:
-        raise ValidationError("timeout must be a finite positive number") from None
-
-    if not math.isfinite(value) or value <= 0:
-        raise ValidationError("timeout must be a finite positive number")
+    if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
+        raise ValidationError(message)

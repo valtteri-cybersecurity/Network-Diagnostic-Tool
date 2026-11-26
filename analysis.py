@@ -1,8 +1,16 @@
+import math
 from typing import Optional
 
 from models import (
     DnsLatencyResult, LatencyAnalysis, ListeningSocket, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
 )
+from exceptions import ParsingError
+from parsers import MAX_PORT, parse_port
+
+
+def _check_latency(value: float) -> None:
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("latency must be a finite non-negative number")
 
 
 def count_open_ports(open_port_data: list[ListeningSocket]) -> SocketCounts:
@@ -26,9 +34,16 @@ def analyze_open_ports(open_port_data: list[ListeningSocket]) -> list[ServiceInf
     services = []
 
     for row in open_port_data:
-        try:
-            port = int(row.local_port)
-        except (ValueError, TypeError):
+        # Service suggestions need a real port in the range 1-65535: an int or a
+        # decimal string. Booleans, floats and other text are skipped.
+        port = row.local_port
+        if not isinstance(port, int) or isinstance(port, bool):
+            try:
+                port = parse_port(port)
+            except ParsingError:
+                continue
+
+        if not 1 <= port <= MAX_PORT:
             continue
 
         service_name = known_ports.get(port, "UNKNOWN")
@@ -44,6 +59,7 @@ def analyze_open_ports(open_port_data: list[ListeningSocket]) -> list[ServiceInf
 
 def dns_latency_analyzation(latency_data: DnsLatencyResult) -> LatencyAnalysis:
     latency = latency_data.dns_latency_ms
+    _check_latency(latency)
 
     if latency < 20:
         status = "EXCELLENT"
@@ -57,6 +73,7 @@ def dns_latency_analyzation(latency_data: DnsLatencyResult) -> LatencyAnalysis:
 
 def ping_latency_analyzation(result: PingResult) -> str:
     average_latency = result.avg_rtt_ms
+    _check_latency(average_latency)
 
     if average_latency < 1:
         return "Excellent"
@@ -83,6 +100,11 @@ def analyze_packet_loss(loss: Optional[float]) -> PacketLossStatus:
 
 
 def analyze_jitter(minimum, maximum):
+    _check_latency(minimum)
+    _check_latency(maximum)
+    if minimum > maximum:
+        raise ValueError("RTT range requires minimum <= maximum")
+
     rtt_range = maximum - minimum
 
     if rtt_range < 5:

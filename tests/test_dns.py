@@ -167,20 +167,6 @@ def test_dns_query_reports_failed_or_empty_lookup(returncode, output, monkeypatc
     )
 
 
-def test_dns_query_currently_accepts_invalid_address_with_success_code(monkeypatch):
-    # Current validation gap; see KNOWN_ISSUES.md.
-    monkeypatch.setattr(dns, "dns_run", Mock(return_value=CommandResult([], "not-an-address example.com\n", "", 0, 0.0)))
-
-    result = dns.dns_query("example.com")
-
-    assert result == DnsQueryResult(
-        resolved=True,
-        hostname="example.com",
-        ip_address="not-an-address",
-        execution_status=ExecutionStatus.COMPLETED,
-    )
-
-
 @pytest.mark.parametrize("fixture_name, site, status, latency, resolved", [
     ("dig_noerror.txt", "example.com", "NOERROR", 12.0, True),
     ("dig_nxdomain.txt", "missing.example.com", "NXDOMAIN", 4.0, False),
@@ -207,14 +193,13 @@ def test_dns_latency_parses_response_and_uses_bounded_dig_query(
 
 
 @pytest.mark.parametrize("old_text, new_text, status, latency, answers, resolved", [
-    ("status: NOERROR", "response: NOERROR", None, 12.0, 2, None),
+    # A failed parse carries no partial measurement values.
+    ("status: NOERROR", "response: NOERROR", None, None, None, None),
     (";; Query time: 12 msec", "", "NOERROR", None, 2, True),
     ("ANSWER: 2", "RECORDS: 2", "NOERROR", 12.0, None, None),
     ("ANSWER: 2", "ANSWER: 0", "NOERROR", 12.0, 0, False),
     ("Query time: 12 msec", "Query time: 0 msec", "NOERROR", 0.0, 2, True),
     ("Query time: 12 msec", "Query time: 0.125 msec", "NOERROR", 0.125, 2, True),
-    ("Query time: 12 msec", "Query time: invalid msec", "NOERROR", None, 2, True),
-    ("ANSWER: 2", "ANSWER: invalid", "NOERROR", 12.0, None, None),
 ])
 def test_dns_latency_handles_missing_fields_and_measurement_values(
     old_text, new_text, status, latency, answers, resolved, monkeypatch,
@@ -423,3 +408,53 @@ def test_dns_run_and_ipv_check_accept_valid_single_label_and_trailing_dot_names(
     assert [item.args[0] for item in subprocess_run.call_args_list] == [
         ["getent", "hosts", site], ["getent", "ahostsv4", site], ["getent", "ahostsv6", site],
     ]
+
+
+@pytest.mark.parametrize("output", [
+    "not-an-address example.com\n",
+    "192.0.2.10 example.com\n999.1.2.3 example.com\n",
+    "-f example.com\n",
+])
+def test_dns_query_reports_invalid_getent_address_as_failed_result(output, monkeypatch):
+    monkeypatch.setattr(dns, "dns_run", Mock(return_value=CommandResult([], output, "", 0, 0.0)))
+
+    result = dns.dns_query("example.com")
+
+    assert result == DnsQueryResult(
+        hostname="example.com", execution_status=ExecutionStatus.FAILED,
+        resolved=None, ip_address=None, error="Invalid address in getent output",
+    )
+
+
+@pytest.mark.parametrize("old_text, new_text, error", [
+    ("Query time: 12 msec", "Query time: -5 msec", "Invalid DNS query time"),
+    ("Query time: 12 msec", "Query time: nan msec", "Invalid DNS query time"),
+    ("Query time: 12 msec", "Query time: inf msec", "Invalid DNS query time"),
+    ("Query time: 12 msec", "Query time: invalid msec", "Invalid DNS query time"),
+    ("Query time: 12 msec", "Query time: 12", "Invalid DNS query time"),
+    ("ANSWER: 2", "ANSWER: invalid", "Invalid DNS answer count"),
+    ("ANSWER: 2", "ANSWER: -1", "Invalid DNS answer count"),
+    ("status: NOERROR", "status: noerror", "Invalid DNS response status"),
+])
+def test_dns_latency_reports_invalid_field_values_as_failed_result(old_text, new_text, error, monkeypatch):
+    output = (FIXTURE_DIRECTORY / "dig_noerror.txt").read_text(encoding="utf-8").replace(old_text, new_text)
+    monkeypatch.setattr(dns, "run_command", Mock(return_value=CommandResult([], output, "", 0, 0.0)))
+
+    result = dns.dns_latency("example.com")
+
+    assert result == DnsLatencyResult(
+        hostname="example.com", execution_status=ExecutionStatus.FAILED, error=error,
+    )
+
+
+def test_dns_latency_reports_conflicting_status_values_as_failed_result(monkeypatch):
+    output = (FIXTURE_DIRECTORY / "dig_noerror.txt").read_text(encoding="utf-8")
+    output += ";; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 2\n"
+    monkeypatch.setattr(dns, "run_command", Mock(return_value=CommandResult([], output, "", 0, 0.0)))
+
+    result = dns.dns_latency("example.com")
+
+    assert result == DnsLatencyResult(
+        hostname="example.com", execution_status=ExecutionStatus.FAILED,
+        error="Conflicting DNS response status values",
+    )

@@ -68,17 +68,18 @@ A hostname not found by getent is reported as an unsuccessful lookup. DNS respon
 | --- | --- |
 | main.py | Menu navigation and coordination |
 | command_runner.py | Safe command execution, timeouts, and execution timing |
-| exceptions.py | Shared diagnostic, validation, and command exceptions |
+| exceptions.py | Shared diagnostic, validation, parsing, and command exceptions |
 | validation.py | Input validation before commands are executed |
+| parsers.py | Pure, validating parsers for ping, DNS, and network command output |
 | models.py | Typed command, diagnostic, socket, interface, and analysis data models |
-| network.py | Network data collection and output parsing |
-| ping.py | UI-independent ping execution, statistics parsing, and analysis coordination |
+| network.py | Network data collection |
+| ping.py | UI-independent ping execution and analysis coordination |
 | dns.py | Hostname resolution, address lookups, and DNS measurements |
 | analysis.py | Socket filtering, service-name suggestions, and measurement classifications |
 | output.py | Menus, reports, error messages, and screen output |
 
-The diagnostic engine consists of `ping`, `dns`, `network`, `analysis`, `models`,
-`exceptions`, `validation`, and `command_runner`. It executes commands, parses their output,
+The diagnostic engine consists of `ping`, `dns`, `network`, `analysis`, `parsers`,
+`models`, `exceptions`, `validation`, and `command_runner`. It executes commands, parses their output,
 builds result models, and classifies measurements. It never prints, prompts,
 clears the screen, or imports `main` or `output`. Importing modules runs no commands.
 
@@ -89,9 +90,12 @@ or run diagnostics. All print calls and terminal clearing remain in `output.py`.
 
 Dependencies flow from CLI to engine: `main` calls diagnostic/analysis functions
 and `output`; `output` uses only the shared models and standard-library formatting.
-`ping` uses `network`, `analysis`, and the command runner; `dns` and `network` use
-the runner; `analysis` uses models. `ping`, `dns`, `network`, and the runner use
-`validation`, which depends only on shared exceptions. The runner uses models and shared exceptions.
+`ping` uses `network`, `analysis`, `parsers`, and the command runner; `dns` and `network`
+use `parsers` and the runner; `analysis` uses models and `parsers.parse_port()`.
+`main` uses `parsers` for socket and NetworkManager rows. `ping`, `dns`, `network`,
+`parsers`, and the runner use `validation`, which depends only on shared exceptions.
+`parsers` uses models, shared exceptions, and `validation` only. The runner uses
+models and shared exceptions.
 There are no engine-to-CLI dependencies or circular imports. A future GUI can
 call the same engine functions and render the same results without CLI imports.
 
@@ -102,9 +106,9 @@ Network, DNS, and ping diagnostics use the UI-independent `command_runner`.
 of string arguments, runs without a shell, and returns `CommandResult` with
 `arguments`, `stdout`, `stderr`, `return_code`, and `duration_seconds` measured
 with `time.monotonic()`. The environment is copied with `LC_ALL=C`; the timeout
-must be a finite positive number. Invalid arguments (not a non-empty list of
-strings, an empty program name, or any NUL character) and invalid timeouts
-(non-numeric, boolean, zero, negative, NaN, infinite, or too large for a float)
+must be greater than 0 and at most 60 seconds. Invalid arguments (not a non-empty
+list of strings, an empty program name, or any NUL character) and invalid timeouts
+(non-numeric, boolean, zero, negative, NaN, infinite, or above 60 seconds)
 raise `ValidationError` before `subprocess.run()` is called. Later empty arguments
 and spaces are allowed.
 
@@ -120,23 +124,30 @@ raise `ValidationError(DiagnosticError)` otherwise. They never modify the value.
 | `validate_ipv4_address(value)` | Four-part dotted-decimal IPv4 addresses without leading zeros. |
 | `validate_interface_name(value)` | 1-15 ASCII letters, digits, `_`, `.`, or `-`; not starting with `-` and not `.` or `..`. |
 | `validate_command_arguments(arguments)` | A non-empty list of strings with a non-empty program name and no NUL characters. |
-| `validate_timeout(timeout)` | A positive, finite `int` or `float` (not `bool`). |
+| `validate_timeout(timeout)` | An `int` or `float` (not `bool`) greater than 0 and at most `MAX_TIMEOUT_SECONDS` (60). |
 
 `validate_host` rejects empty values, whitespace and control characters, URIs,
 CIDR prefixes, ports, brackets, IPv6 scope IDs, Unicode names, values starting
-with `-`, `+`, or `@`, and digit-and-dot values that are not valid IPv4 addresses
-(such as `999.1.2.3`).
+with `-`, `+`, or `@`, and names made only of decimal, octal, or hexadecimal
+numeric labels that are not valid dotted-decimal IPv4 addresses (such as
+`999.1.2.3`, `0x7f.0.0.1`, or `0x7f`). The resolver would read such names as
+alternative IPv4 forms. Names with at least one other label, such as
+`0xdeadbeef.example` or `3com`, are still accepted.
+
+Error messages show at most the first 64 characters of a rejected value, with
+control characters escaped and `...` marking a truncated value.
 
 Validation happens immediately before each command: `dns_run()`, `ipv_check()`,
 and `dns_latency()` validate the host; `dns_latency()` passes it to dig after `-q`.
 Ping validates its target, and the gateway read from the routing table must be an
-IPv4 address. `get_ip()` validates the interface name taken from the routing table
-before running `ip ... addr show dev`. Other route, `src`, DNS, and socket output is
-not validated in this phase.
+IPv4 address. `get_ip()` runs `ip ... addr show dev` only with an interface name
+that the route parser has validated. Command output is validated by `parsers.py`
+(see [Output parsing](#output-parsing)).
 
 The interface name rule is conservative: Linux allows some longer-looking or
-non-ASCII names that are rejected here. A valid timeout does not limit command
-duration by itself; the per-command timeouts described above still apply.
+non-ASCII names that are rejected here. The 60-second maximum is a general upper
+bound that keeps timeouts within what `subprocess` can handle; the per-command
+timeouts described above (10 seconds) still apply.
 
 Technical failures raise `CommandNotFoundError`, `CommandTimeoutError`, or
 `CommandExecutionError`, all derived from `CommandError` and `DiagnosticError`.
@@ -208,18 +219,56 @@ else:
 The call itself produces no terminal output and asks for no input. It executes
 one normal three-packet ping; the same interface can supply a GUI. Supported target
 keys remain `localhost`, `gateway`, `internet`, and `google.com`. `ping_target()`
-and `get_ping_statistics()` provide measurements without the additional analyses.
+and `parsers.parse_ping_statistics()` provide measurements without the additional analyses.
 DNS uses `dns_query()`, `dns_latency()`, and `ipv_check()` for structured results;
 network collection/parsing and `analysis` functions can likewise be called directly.
 
 DNS and network command failures continue to raise shared `CommandError`
 subclasses for the caller to handle. DNS result models describe returned data;
-they do not replace the established exception contract. An unparseable DNS response
-status yields a failed `DnsLatencyResult`, while a known DNS response code can be
-completed even when timing or answer-count information is unavailable.
+they do not replace the established exception contract. Unparseable or invalid
+dig or getent output yields a failed `DnsLatencyResult` or `DnsQueryResult`,
+while a known DNS response code can be completed even when timing or answer-count
+information is unavailable.
 
 Routing remains based on the current text output from `ip`; no route model is
-introduced. Only the interface name and gateway taken from it are validated.
+introduced, and the default route selection is unchanged.
+
+## Output parsing
+
+`parsers.py` turns command output into validated values and result models. Parsers
+are pure functions: they run no commands, use no network, print nothing, ask for no
+input, and change no external state. Malformed, contradictory, or implausible output
+raises `ParsingError(DiagnosticError)`. A missing optional measurement stays `None`
+and is never reported as zero.
+
+| Situation | Result |
+| --- | --- |
+| Input rejected before a command | `ValidationError` |
+| Command could not run, failed, or timed out | `CommandError` subclass |
+| Malformed or contradictory output | `ParsingError`; converted to a failed `PingResult`, `DnsQueryResult`, or `DnsLatencyResult` by `ping_target()`, `dns_query()`, and `dns_latency()`; raised by network functions |
+| Optional value absent from valid output | Field is `None` |
+| Valid measurement of a failure, such as 100% loss or NXDOMAIN | `COMPLETED` result |
+
+A failed parse carries no partial measurement values; ping keeps the raw output.
+`main.py` reports every `DiagnosticError` as an expected error and returns to the menu.
+
+| Parser | Validation |
+| --- | --- |
+| `parse_ping_statistics(output, target)` | Packet counts are ASCII integers, at least one packet was sent, and received ≤ sent. Loss is 0-100% and within one percentage point of the counts (this covers iputils `%g`, macOS `%.1f`, and BusyBox integer rounding). RTT values are non-negative decimals (no NaN, infinity, or exponent) with min ≤ avg ≤ max. Duplicate replies (`+N duplicates`) are not counted as received. Complete loss without an RTT line is a completed measurement with `None` RTT values; an RTT line without received packets, received packets without an RTT line, or repeated statistics lines are errors. Four RTT values are required. |
+| `parse_getent_hosts(output)` | Every address must be a valid IPv4 or IPv6 address; returns the first one or `None`. |
+| `parse_getent_addresses(output, version)` | Returns unique addresses of one version; invalid and other-version lines are skipped. |
+| `parse_dig_output(output, hostname)` | Requires a response code (`[A-Z][A-Z0-9]*`); the answer count is an integer and the query time a non-negative decimal in `msec`. A present but invalid value or conflicting repeated values are errors; an absent value is `None`. The response code and the query time stay separate. |
+| `parse_ss_output(lines)` | Ports are `*` or 0-65535; addresses are `*`, IPv4, or IPv6, optionally with a `%interface` scope inside or after the brackets. Lines that do not match are skipped. |
+| `parse_nmcli_output(lines)`, `parse_nmcli_states(output)` | Lines with a wrong field count or an empty device or state are skipped. |
+| `parse_default_gateway()`, `parse_default_source()`, `parse_default_interface()` | The `via` and `src` values must be IPv4 addresses and `dev` a valid interface name (phase 8 validators). |
+| `parse_interface_ipv4_address(output)` | The first `inet` address must be a valid IPv4 address. |
+| `parse_port(text)` | A decimal string in the range 0-65535. |
+
+Analysis rejects implausible input: service suggestions only use ports 1-65535
+(int or decimal string), and latency and RTT-range classifiers raise `ValueError`
+for negative, non-finite, or reversed values.
+
+DNS server information is not part of the current functionality and is not parsed.
 
 ## Measurement limits
 
@@ -254,7 +303,7 @@ python -m pytest -v
 Measure line and branch coverage for the whole application:
 
 ```bash
-python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov-branch --cov-report=term-missing
+python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov=parsers --cov-branch --cov-report=term-missing
 ```
 
 Tests are in `tests/`, with reusable command output in `tests/fixtures/`.
@@ -264,6 +313,10 @@ fixtures fail immediately if a test attempts an unmocked system command. Menu
 tests use finite input sequences, and date-dependent output uses a fixed clock.
 Architecture tests import a fresh engine with CLI modules unavailable and verify
 silent ping success, complete packet loss, technical failure, and timeout handling.
+They also check that `parsers.py` imports only models, exceptions, validation, and
+standard-library modules and runs without commands, input, or output. Parser tests in
+`tests/test_parsers.py` call the parsers directly with realistic output, without
+subprocess mocks.
 Report tests check that rendering neither mutates data nor executes commands.
 
 ## Validation

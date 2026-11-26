@@ -243,3 +243,20 @@ def test_shared_fixture_blocks_unconfigured_command_execution(subprocess_run):
         command_runner.run_command(["hostname"])
 
     subprocess_run.assert_called_once()
+
+
+@pytest.mark.parametrize("timeout", [60.000001, 61, 1e7, 10 ** 8, 1e300])
+def test_run_command_rejects_timeout_above_maximum_before_execution(timeout, subprocess_run):
+    with pytest.raises(ValidationError, match="timeout must be"):
+        command_runner.run_command(["hostname"], timeout=timeout)
+
+    subprocess_run.assert_not_called()
+
+
+def test_run_command_accepts_maximum_timeout(subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, "host", "")
+
+    command_runner.run_command(["hostname"], timeout=60)
+
+    assert subprocess_run.call_args.kwargs["timeout"] == 60

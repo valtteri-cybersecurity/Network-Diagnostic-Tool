@@ -209,49 +209,6 @@ def test_ping_target_reports_unknown_target(target, subprocess_run):
     subprocess_run.assert_not_called()
 
 
-@pytest.mark.parametrize("fixture_name, received, loss, average, maximum, deviation", [
-    ("success.txt", 3, 0.0, 12.5, 15.0, 2.041),
-    ("partial_loss.txt", 2, 33.3333, 15.0, 20.0, 5.0),
-])
-def test_get_ping_statistics_parses_successful_measurements(fixture_name, received, loss, average, maximum, deviation):
-    output = (FIXTURE_DIRECTORY / fixture_name).read_text(encoding="utf-8")
-
-    result = ping.get_ping_statistics(output, "example.com")
-
-    assert result == PingResult(
-        target="example.com", execution_status=ExecutionStatus.COMPLETED,
-        packets_sent=3, packets_received=received, packet_loss_percent=loss,
-        min_rtt_ms=10.0, avg_rtt_ms=average, max_rtt_ms=maximum, mdev_ms=deviation,
-        reachable=True, raw_output=output,
-    )
-
-
-def test_get_ping_statistics_accepts_round_trip_statistics():
-    output = (FIXTURE_DIRECTORY / "success.txt").read_text(encoding="utf-8")
-    output = output.replace("rtt min/avg/max/mdev", "round-trip min/avg/max/stddev")
-
-    result = ping.get_ping_statistics(output, "example.com")
-
-    assert result == PingResult(
-        target="example.com", execution_status=ExecutionStatus.COMPLETED,
-        packets_sent=3, packets_received=3, packet_loss_percent=0.0,
-        min_rtt_ms=10.0, avg_rtt_ms=12.5, max_rtt_ms=15.0, mdev_ms=2.041,
-        reachable=True, raw_output=output,
-    )
-
-
-def test_get_ping_statistics_reports_total_packet_loss_without_rtt():
-    output = (FIXTURE_DIRECTORY / "total_loss.txt").read_text(encoding="utf-8")
-
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", execution_status=ExecutionStatus.COMPLETED,
-        packets_sent=3, packets_received=0, packet_loss_percent=100.0,
-        reachable=False, raw_output=output,
-    )
-
-
 @pytest.mark.parametrize("message", ["command failed", "timeout details", ""])
 def test_ping_target_translates_diagnostic_errors_once(message, monkeypatch):
     error = DiagnosticError(message)
@@ -262,109 +219,6 @@ def test_ping_target_translates_diagnostic_errors_once(message, monkeypatch):
 
     assert result == PingResult(target="internet", error=message)
     helper.assert_called_once_with()
-
-
-@pytest.mark.parametrize("output", [
-    "", " \n", "PING example.com (192.0.2.10) 56(84) bytes of data.\n",
-    "rtt min/avg/max/mdev = 10.000/12.500/15.000/2.041 ms\n",
-])
-def test_get_ping_statistics_reports_missing_packet_statistics(output):
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(target="internet", raw_output=output, error="No packet statistics found")
-
-
-@pytest.mark.parametrize("output, received, loss", [
-    ("3 packets transmitted, 3 received", 3, None),
-    ("3 packets transmitted, 0% packet loss", None, 0.0),
-    ("3 packets transmitted", None, None),
-])
-def test_get_ping_statistics_reports_incomplete_packet_statistics(output, received, loss):
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", raw_output=output, packets_sent=3,
-        packets_received=received, packet_loss_percent=loss, error="Incomplete packet statistics",
-    )
-
-
-@pytest.mark.parametrize("output, sent, received", [
-    ("invalid packets transmitted, 3 received, 0% packet loss", None, None),
-    ("3.5 packets transmitted, 3 received, 0% packet loss", None, None),
-    ("3 packets transmitted, invalid received, 0% packet loss", 3, None),
-    ("3 packets transmitted, 3 received, invalid% packet loss", 3, 3),
-])
-def test_get_ping_statistics_reports_invalid_packet_numbers(output, sent, received):
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", raw_output=output, packets_sent=sent, packets_received=received,
-        error="Unable to parse packet statistics",
-    )
-
-
-def test_get_ping_statistics_reports_missing_rtt_after_received_packets():
-    output = "3 packets transmitted, 3 received, 0% packet loss, time 2002ms\n"
-
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", raw_output=output, packets_sent=3, packets_received=3,
-        packet_loss_percent=0.0, reachable=True, error="No latency data available",
-    )
-
-
-@pytest.mark.parametrize("rtt_line", [
-    "rtt min/avg/max/mdev 10.000/12.500/15.000/2.041 ms",
-    "rtt min/avg/max/mdev = 10.000/12.500/15.000 ms",
-    "rtt min/avg/max/mdev = 10.000/12.500/15.000/2.041/99 ms",
-    "rtt min/avg/max/mdev = invalid/12.500/15.000/2.041 ms",
-    "rtt min/avg/max/mdev = 10.000/invalid/15.000/2.041 ms",
-    "rtt min/avg/max/mdev = 10.000/12.500/invalid/2.041 ms",
-    "rtt min/avg/max/mdev = 10.000/12.500/15.000/invalid ms",
-    "rtt min/avg/max/mdev = ",
-])
-def test_get_ping_statistics_reports_malformed_rtt(rtt_line):
-    output = "3 packets transmitted, 3 received, 0% packet loss\n" + rtt_line
-
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", raw_output=output, packets_sent=3, packets_received=3,
-        packet_loss_percent=0.0, reachable=True, error="Unable to parse latency statistics",
-    )
-
-
-def test_get_ping_statistics_currently_accepts_impossible_packet_counts_and_loss():
-    output = (
-        "3 packets transmitted, 4 received, 150% packet loss\n"
-        "rtt min/avg/max/mdev = 10.000/12.500/15.000/2.041 ms\n"
-    )
-
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", execution_status=ExecutionStatus.COMPLETED,
-        packets_sent=3, packets_received=4, packet_loss_percent=150.0,
-        min_rtt_ms=10.0, avg_rtt_ms=12.5, max_rtt_ms=15.0, mdev_ms=2.041,
-        reachable=True, raw_output=output,
-    )
-
-
-def test_get_ping_statistics_currently_accepts_negative_and_reversed_rtt():
-    output = (
-        "3 packets transmitted, 3 received, 0% packet loss\n"
-        "rtt min/avg/max/mdev = 20.000/-1.000/10.000/2.041 ms\n"
-    )
-
-    result = ping.get_ping_statistics(output, "internet")
-
-    assert result == PingResult(
-        target="internet", execution_status=ExecutionStatus.COMPLETED,
-        packets_sent=3, packets_received=3, packet_loss_percent=0.0,
-        min_rtt_ms=20.0, avg_rtt_ms=-1.0, max_rtt_ms=10.0, mdev_ms=2.041,
-        reachable=True, raw_output=output,
-    )
 
 
 @pytest.mark.parametrize("fixture_name, received, loss, average, maximum, deviation", [
@@ -526,24 +380,6 @@ def test_run_ping_diagnostic_returns_technical_failure_instead_of_stdout_statist
     assert captured.err == ""
 
 
-def test_total_packet_loss_is_a_completed_measurement():
-    raw = (FIXTURE_DIRECTORY / "total_loss.txt").read_text(encoding="utf-8")
-
-    result = ping.get_ping_statistics(raw, "internet")
-
-    assert result.execution_status is ExecutionStatus.COMPLETED
-    assert result.packets_sent == 3
-    assert result.packets_received == 0
-    assert result.packet_loss_percent == 100.0
-    assert result.reachable is False
-    assert result.error is None
-    assert result.min_rtt_ms is None
-    assert result.avg_rtt_ms is None
-    assert result.max_rtt_ms is None
-    assert result.mdev_ms is None
-
-
-
 def test_ping_target_reports_missing_gateway_as_unknown_reachability(monkeypatch, subprocess_run):
     monkeypatch.setattr(ping, "get_gateway", Mock(return_value=None))
 
@@ -564,32 +400,6 @@ def test_timeout_does_not_turn_partial_statistics_into_completed_measurement(sub
     assert result.packets_received is None
     assert result.reachable is None
     assert result.avg_rtt_ms is None
-
-
-def test_malformed_rtt_does_not_claim_unreachable_target():
-    raw = "3 packets transmitted, 0 received, 100% packet loss\nrtt invalid\n"
-
-    result = ping.get_ping_statistics(raw, "internet")
-
-    assert result.execution_status is ExecutionStatus.FAILED
-    assert result.reachable is None
-    assert result.error == "Unable to parse latency statistics"
-
-
-def test_ping_statistics_preserves_zero_rtt_values():
-    raw = (
-        "3 packets transmitted, 3 received, 0% packet loss\n"
-        "rtt min/avg/max/mdev = 0.000/0.000/0.000/0.000 ms\n"
-    )
-
-    result = ping.get_ping_statistics(raw, "localhost")
-
-    assert result.execution_status is ExecutionStatus.COMPLETED
-    assert result.reachable is True
-    assert result.min_rtt_ms == 0.0
-    assert result.avg_rtt_ms == 0.0
-    assert result.max_rtt_ms == 0.0
-    assert result.mdev_ms == 0.0
 
 
 def test_run_ping_diagnostic_returns_timeout_status_and_partial_output(subprocess_run, capsys):
@@ -674,7 +484,7 @@ def test_ping_target_reports_invalid_route_gateway_after_route_query_only(subpro
 
     assert result.target == "gateway"
     assert result.execution_status is ExecutionStatus.FAILED
-    assert result.error.startswith("Invalid IPv4 address")
+    assert result.error == "Invalid default gateway: Invalid IPv4 address: '-f'"
     assert result.raw_output == ""
     assert result.reachable is None
     assert result.latency_analysis is None
@@ -691,3 +501,69 @@ def test_ping_target_reports_wrong_selector_type_without_running_command(target,
     assert result.target == str(target)
     assert result.error == f"Invalid ping target type: {type(target).__name__}"
     subprocess_run.assert_not_called()
+
+
+PING_SUMMARY = "3 packets transmitted, 3 received, 0% packet loss, time 2002ms\n"
+PING_RTT = "rtt min/avg/max/mdev = 10.000/12.500/15.000/2.041 ms\n"
+
+
+@pytest.mark.parametrize("raw, error", [
+    ("3 packets transmitted, 4 received, 150% packet loss\n" + PING_RTT,
+     "Invalid packet statistics: more packets received than transmitted"),
+    ("3 packets transmitted, 3 received, 150% packet loss\n" + PING_RTT,
+     "Invalid packet statistics: packet loss outside 0-100%"),
+    ("3 packets transmitted, 3 received, 100% packet loss\n" + PING_RTT,
+     "Invalid packet statistics: packet loss does not match packet counts"),
+    ("3 packets transmitted, 1 received, 33.3333% packet loss\n" + PING_RTT,
+     "Invalid packet statistics: packet loss does not match packet counts"),
+    ("0 packets transmitted, 0 received, 0% packet loss\n",
+     "Invalid packet statistics: no packets transmitted"),
+    ("3 packets transmitted, -1 received, 0% packet loss\n" + PING_RTT,
+     "Unable to parse packet statistics"),
+    ("3 packets transmitted, 3 received, -5% packet loss\n" + PING_RTT,
+     "Unable to parse packet statistics"),
+    ("3 packets transmitted, 3 received, nan% packet loss\n" + PING_RTT,
+     "Unable to parse packet statistics"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = 20.000/-1.000/10.000/2.041 ms\n",
+     "Unable to parse latency statistics"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = nan/nan/nan/nan ms\n",
+     "Unable to parse latency statistics"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = inf/inf/inf/0.000 ms\n",
+     "Unable to parse latency statistics"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = 1e1/1e1/1e1/0 ms\n",
+     "Unable to parse latency statistics"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = 20.000/12.500/10.000/2.041 ms\n",
+     "Invalid latency statistics: expected min <= avg <= max"),
+    (PING_SUMMARY + "rtt min/avg/max/mdev = 10.000/16.000/15.000/2.041 ms\n",
+     "Invalid latency statistics: expected min <= avg <= max"),
+    ("3 packets transmitted, 0 received, 100% packet loss\n" + PING_RTT,
+     "Invalid latency statistics: latency reported without received packets"),
+    (PING_SUMMARY + PING_SUMMARY + PING_RTT, "Multiple packet statistics found"),
+    (PING_SUMMARY + PING_RTT + PING_RTT, "Multiple latency statistics found"),
+])
+def test_ping_target_rejects_implausible_or_contradictory_statistics(raw, error, subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, raw, "")
+
+    result = ping.ping_target("internet")
+
+    assert result == PingResult(target="internet", error=error, raw_output=raw)
+
+
+@pytest.mark.parametrize("raw, received, loss", [
+    ("3 packets transmitted, 2 received, 33.3333% packet loss\n", 2, 33.3333),
+    ("3 packets transmitted, 2 received, 33.3% packet loss\n", 2, 33.3),
+    ("3 packets transmitted, 2 packets received, 33% packet loss\n", 2, 33.0),
+    ("3 packets transmitted, 3 received, +1 duplicates, 0% packet loss\n", 3, 0.0),
+])
+def test_ping_target_accepts_rounded_loss_and_reported_duplicates(raw, received, loss, subprocess_run):
+    raw = raw + PING_RTT
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, raw, "")
+
+    result = ping.ping_target("internet")
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.error is None
+    assert result.packets_received == received
+    assert result.packet_loss_percent == loss

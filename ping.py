@@ -1,8 +1,9 @@
 from command_runner import run_command
-from exceptions import CommandError, CommandTimeoutError, DiagnosticError
+from exceptions import CommandError, CommandTimeoutError, DiagnosticError, ParsingError
 from models import CommandResult, ExecutionStatus, PingResult
 from network import get_gateway
 from analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
+from parsers import parse_ping_statistics
 from validation import validate_host, validate_ipv4_address
 
 
@@ -69,82 +70,11 @@ def ping_target(target: str) -> PingResult:
 
     if not result.stdout.strip() and result.stderr.strip():
         return PingResult(target=target, error=result.stderr.strip(), raw_output=result.stdout)
-    return get_ping_statistics(result.stdout, target)
-
-
-def get_ping_statistics(result: str, target: str) -> PingResult:
-    report = PingResult(target=target, raw_output=result)
-
-    transmitted_report = None
-    latency_report = None
-
-    for line in result.splitlines():
-        if "transmitted" in line:
-            transmitted_report = line
-
-        if line.startswith("rtt ") or line.startswith("round-trip "):
-            latency_report = line
-
-    if transmitted_report is None:
-        report.error = "No packet statistics found"
-        return report
 
     try:
-        for action in transmitted_report.split(","):
-            action = action.strip()
-
-            if "transmitted" in action:
-                report.packets_sent = int(action.split()[0])
-
-            elif "received" in action:
-                report.packets_received = int(action.split()[0])
-
-            elif "packet loss" in action:
-                report.packet_loss_percent = float(
-                    action.split()[0].replace("%", "")
-                )
-
-    except (ValueError, IndexError):
-        report.error = "Unable to parse packet statistics"
-        return report
-
-    if any(value is None for value in (
-        report.packets_sent, report.packets_received, report.packet_loss_percent,
-    )):
-        report.error = "Incomplete packet statistics"
-        return report
-
-    if report.packets_received > 0:
-        report.reachable = True
-    if latency_report is None:
-        if report.packets_received == 0:
-            report.execution_status = ExecutionStatus.COMPLETED
-            report.reachable = False
-            return report
-        report.error = "No latency data available"
-        return report
-
-    try:
-        latency_values = latency_report.split("=", 1)[1]
-        latency_values = latency_values.replace(" ms", "").strip()
-
-        min_value, avg_value, max_value, mdev = latency_values.split("/")
-
-        minimum = float(min_value)
-        average = float(avg_value)
-        maximum = float(max_value)
-        deviation = float(mdev)
-        report.min_rtt_ms = minimum
-        report.avg_rtt_ms = average
-        report.max_rtt_ms = maximum
-        report.mdev_ms = deviation
-        report.reachable = report.packets_received > 0
-        report.execution_status = ExecutionStatus.COMPLETED
-
-    except (ValueError, IndexError):
-        report.error = "Unable to parse latency statistics"
-
-    return report
+        return parse_ping_statistics(result.stdout, target)
+    except ParsingError as error:
+        return PingResult(target=target, error=str(error), raw_output=result.stdout)
 
 
 def run_ping_diagnostic(target: str) -> PingResult:

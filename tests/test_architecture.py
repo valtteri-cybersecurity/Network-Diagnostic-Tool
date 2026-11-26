@@ -15,7 +15,8 @@ def test_engine_imports_and_ping_diagnostic_work_without_ui_modules(
     import subprocess
 
     engine_names = [
-        "models", "exceptions", "validation", "command_runner", "network", "analysis", "dns", "ping",
+        "models", "exceptions", "validation", "parsers", "command_runner", "network", "analysis",
+        "dns", "ping",
     ]
     read_input = Mock(side_effect=AssertionError("Engine must not request input"))
     monkeypatch.setattr("builtins.input", read_input)
@@ -86,7 +87,8 @@ def test_engine_rejects_invalid_input_without_commands_output_or_ui_modules(
     import subprocess
 
     engine_names = [
-        "models", "exceptions", "validation", "command_runner", "network", "analysis", "dns", "ping",
+        "models", "exceptions", "validation", "parsers", "command_runner", "network", "analysis",
+        "dns", "ping",
     ]
     read_input = Mock(side_effect=AssertionError("Engine must not request input"))
     monkeypatch.setattr("builtins.input", read_input)
@@ -114,7 +116,7 @@ def test_engine_rejects_invalid_input_without_commands_output_or_ui_modules(
 
         assert isinstance(result, modules["models"].PingResult)
         assert result.execution_status is modules["models"].ExecutionStatus.FAILED
-        assert result.error == "Invalid IPv4 address: '-f'"
+        assert result.error == "Invalid default gateway: Invalid IPv4 address: '-f'"
         assert sys.modules["main"] is None
         assert sys.modules["output"] is None
 
@@ -125,3 +127,31 @@ def test_engine_rejects_invalid_input_without_commands_output_or_ui_modules(
     subprocess_run.assert_called_once()
     assert subprocess_run.call_args.args[0] == ["ip", "-4", "route"]
     system_command.assert_not_called()
+
+
+def test_parsers_are_pure_and_independent_of_commands_and_ui(subprocess_run, system_command, monkeypatch, capsys):
+    import ast
+
+    source = (Path(__file__).parent.parent / "parsers.py").read_text(encoding="utf-8")
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+    read_input = Mock(side_effect=AssertionError("Parsers must not request input"))
+    monkeypatch.setattr("builtins.input", read_input)
+    import parsers
+
+    raw = (Path(__file__).parent / "fixtures" / "ping" / "success.txt").read_text(encoding="utf-8")
+    parsers.parse_ping_statistics(raw, "internet")
+    with pytest.raises(parsers.ParsingError):
+        parsers.parse_ping_statistics("", "internet")
+
+    assert imported == {"ipaddress", "re", "typing", "exceptions", "models", "validation"}
+    subprocess_run.assert_not_called()
+    system_command.assert_not_called()
+    read_input.assert_not_called()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

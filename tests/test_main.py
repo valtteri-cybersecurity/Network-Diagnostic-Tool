@@ -13,7 +13,8 @@ from models import (
     LatencyAnalysis, ListeningSocket, NetworkInterface, PingResult, ServiceInfo, SocketCounts,
 )
 from exceptions import (
-    CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError,
+    CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, DiagnosticError,
+    ParsingError, ValidationError,
 )
 
 
@@ -230,7 +231,7 @@ def test_main_displays_listening_socket_counts_and_rows(user_input, monkeypatch)
     display_counts = Mock()
     display_ports = Mock()
     monkeypatch.setattr(main.network, "get_listening_sockets", collect)
-    monkeypatch.setattr(main.network, "parse_ss_output", parse)
+    monkeypatch.setattr(main.parsers, "parse_ss_output", parse)
     monkeypatch.setattr(main.analysis, "get_open_ports", select)
     monkeypatch.setattr(main.analysis, "count_open_ports", count)
     monkeypatch.setattr(main.output, "display_open_ports_header", header)
@@ -324,7 +325,9 @@ def test_main_displays_networkmanager_interfaces(user_input, monkeypatch):
     display.assert_called_once_with(interfaces)
 
 
-@pytest.mark.parametrize("error_type", [CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError])
+@pytest.mark.parametrize("error_type", [
+    CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError, ParsingError,
+])
 def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeypatch):
     user_input.side_effect = ["1", "5", "5"]
     status = Mock(side_effect=[error_type("nmcli unavailable"), False])
@@ -349,7 +352,10 @@ def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeyp
     ("4", "1", main.network, "get_ip_route"),
     ("4", "2", main.network, "nmcli_status"),
 ])
-@pytest.mark.parametrize("error_type", [CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError])
+@pytest.mark.parametrize("error_type", [
+    CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError,
+    ParsingError, DiagnosticError,
+])
 def test_main_returns_to_main_menu_after_diagnostic_error(
     menu, action, module, function_name, error_type, user_input, monkeypatch,
 ):
@@ -564,9 +570,46 @@ def test_main_reports_invalid_route_interface_without_address_command(user_input
     main.main()
 
     output = capsys.readouterr().out
-    assert "Error: Invalid interface name: '-f'" in output
+    assert "Error: Invalid default route interface: Invalid interface name: '-f'" in output
     assert user_input.call_count == 3
     assert main.output.mainmenu1.call_count == 2
     assert [item.args[0] for item in subprocess_run.call_args_list] == [
         ["ip", "-4", "route"], ["hostname"],
     ]
+
+
+def test_main_does_not_suggest_services_for_invalid_socket_ports(user_input, subprocess_run, monkeypatch):
+    user_input.side_effect = ["3", "2", "3", "5"]
+    raw = (
+        "tcp LISTEN 0 128 0.0.0.0:99999 0.0.0.0:*\n"
+        "tcp LISTEN 0 128 not-an-address:22 0.0.0.0:*\n"
+        "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
+    )
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, raw, "")
+    display = Mock()
+    monkeypatch.setattr(main.output, "display_known_services", display)
+
+    main.main()
+
+    display.assert_called_once_with([
+        ServiceInfo(protocol="TCP", local_address="0.0.0.0", port=22, service_name="SSH"),
+    ])
+
+
+def test_main_reports_invalid_route_source_address_as_controlled_error(user_input, subprocess_run, capsys):
+    user_input.side_effect = ["4", "1", "5"]
+    responses = {
+        "ip": subprocess.CompletedProcess([], 0, "default via 192.0.2.1 dev enp3s0 src not-an-address\n", ""),
+        "hostname": subprocess.CompletedProcess([], 0, "workstation\n", ""),
+    }
+    subprocess_run.side_effect = lambda arguments, **kwargs: responses[arguments[0]]
+
+    main.main()
+
+    output = capsys.readouterr().out
+    assert "Error: Invalid default route source address: Invalid IPv4 address: 'not-an-address'" in output
+    assert "not-an-address" not in output.replace(
+        "Invalid IPv4 address: 'not-an-address'", "",
+    )
+    assert user_input.call_count == 3

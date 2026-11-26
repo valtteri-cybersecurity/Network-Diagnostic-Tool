@@ -7,6 +7,8 @@ ja päivittää silloin myös niitä kuvaavat testit.
 
 Prioriteetit: P2 = normaalikäytön virheellinen tai puutteellinen raportointi,
 P3 = virheellisen tai poikkeavan syötteen validointipuute. Ei havaittuja P0/P1-ongelmia.
+Avoimet kohdat 1 ja 2 liittyvät oletusreitin valintaan ja yhteystilan tulkintaan, ja ne
+kuuluvat vaiheeseen 10.
 
 ## 1. P2: Verkkotiedot voivat yhdistyä eri oletusreiteiltä
 
@@ -25,41 +27,46 @@ jolloin päävalikko ilmoittaa, ettei yhdistettyä verkkoliitäntää havaittu.
 
 Testi: `test_get_network_plugin_currently_ignores_externally_connected_interface`.
 
-## 3. P3: Porttinumeroiden aluetta ja tyyppiä ei validoida
+## Korjattu (vaihe 9): Porttinumeroiden aluetta ja tyyppiä ei validoitu
 
-`analysis.analyze_open_ports()` hyväksyy portit -1 ja 65536 sekä katkaisee
-liukuluvun 22.9 portiksi 22. Tämä voi tuottaa väärän palveluehdotuksen.
+`analysis.analyze_open_ports()` hyväksyi portit -1, 0 ja 65536 sekä katkaisi
+liukuluvun 22.9 portiksi 22. Palveluehdotus hyväksyy nyt vain portin 1–65535
+kokonaislukuna tai desimaalimerkkijonona. `parsers.parse_ss_output()` ohittaa rivit,
+joiden portti ei ole `*` tai 0–65535.
 
-Testit: `test_analyze_open_ports_currently_accepts_any_integer_port` ja
-`test_analyze_open_ports_currently_truncates_float_port`.
+Regressiotestit `test_analyze_open_ports_skips_invalid_or_out_of_range_ports` ja
+`test_main_does_not_suggest_services_for_invalid_socket_ports` epäonnistuivat
+alkuperäisellä toteutuksella ja läpäisevät korjauksen jälkeen.
 
-## 4. P3: Mittausarvojen mielekkyyttä ei validoida
+## Korjattu (vaihe 9): Mittausarvojen mielekkyyttä ei validoitu
 
-`ping.get_ping_statistics()` hyväksyy neljä vastaanotettua pakettia kolmesta
-lähetetystä sekä 150 prosentin hävikin. Negatiivinen keskimääräinen RTT ja
-minimiä pienempi maksimi voivat tuottaa tilan `COMPLETED`. Analysis-moduulin
-viiveluokittelut hyväksyvät negatiiviset ajat, ja käänteinen RTT-väli saa
-luokituksen `Excellent`.
+Ping-tulosteen neljä vastaanotettua pakettia kolmesta lähetetystä, 150 prosentin
+hävikki, pakettimääriin sopimaton hävikki, negatiiviset, NaN- ja äärettömät RTT-arvot
+sekä järjestys, jossa min > avg tai avg > max, tuottavat nyt `ParsingError`-poikkeuksen.
+`ping_target()` muuntaa sen `FAILED`-tulokseksi. Viiveluokittelijat ja RTT-vaihteluväli
+nostavat `ValueError`-poikkeuksen negatiivisesta, ei-äärellisestä tai käänteisestä syötteestä.
 
-Testit: `test_get_ping_statistics_currently_accepts_impossible_packet_counts_and_loss`,
-`test_get_ping_statistics_currently_accepts_negative_and_reversed_rtt`,
-`test_latency_classifiers_currently_accept_negative_measurements` ja
-`test_analyze_jitter_currently_accepts_reversed_measurements`.
+Regressiotestit `test_ping_target_rejects_implausible_or_contradictory_statistics`,
+`test_latency_classifiers_reject_negative_or_non_finite_measurements` ja
+`test_analyze_jitter_rejects_reversed_negative_or_non_finite_measurements`
+epäonnistuivat alkuperäisellä toteutuksella ja läpäisevät korjauksen jälkeen.
 
-## 5. P3: Osoite- ja socket-tulosteiden validointi on puutteellinen
+## Korjattu (vaihe 9): Osoite- ja socket-tulosteiden validointi oli puutteellinen
 
-`dns.dns_query()` tulkitsee minkä tahansa ei-tyhjän getent-tulosteen onnistuneeksi,
-kun paluuarvokoodi on 0. `not-an-address example.com` tuottaa arvot
-`execution_status=COMPLETED`, `resolved=True` ja
-`ip_address="not-an-address"`. `network.get_ip()` hyväksyy vastaavasti
-virheellisen `src`-arvon. `parse_ss_output()` voi säilyttää virheellisen osoitteen
-ja ei-numeerisen portin, jos rivillä on oikea kenttämäärä ja kaksoispisteet.
-
-Testit: `test_dns_query_currently_accepts_invalid_address_with_success_code`,
-`test_get_ip_currently_accepts_invalid_source_address` ja
-`test_parse_ss_output_currently_keeps_invalid_ports_and_unknown_protocols`.
-Tuntemattoman protokollan säilyttäminen itsessään ei ole virhe: suodatus tehdään
+`dns.dns_query()` tuottaa nyt virheellisestä getent-osoitteesta tuloksen
+`execution_status=FAILED` ja virheen `Invalid address in getent output`.
+`network.get_ip()` ja `get_gateway()` sekä `get_nic()` nostavat `ParsingError`-poikkeuksen
+virheellisestä `src`-, `via`- tai `dev`-arvosta. `parse_ss_output()` ohittaa rivit, joilla
+on virheellinen osoite tai portti. Virheelliset dig-kenttien arvot tuottavat `FAILED`-tuloksen.
+Tuntemattoman protokollan säilyttäminen ei edelleenkään ole virhe: suodatus tehdään
 analysis-moduulissa.
+
+Regressiotestit `test_dns_query_reports_invalid_getent_address_as_failed_result`,
+`test_dns_latency_reports_invalid_field_values_as_failed_result`,
+`test_route_values_are_validated_before_use`,
+`test_get_ip_rejects_invalid_interface_address_output` ja
+`test_main_reports_invalid_route_source_address_as_controlled_error` epäonnistuivat
+alkuperäisellä toteutuksella ja läpäisevät korjauksen jälkeen.
 
 ## Korjattu: Pingin stdout peitti teknisen suoritusvirheen
 
@@ -97,6 +104,17 @@ CLI-riippuvuus on poistettu: `run_ping_diagnostic()` korvaa `handle_ping()`-funk
 ja palauttaa mittaukset sekä analyysit `PingResult`-oliossa. Main välittää olion
 Output-moduulille, joka esittää valmiit tiedot muuttamatta niitä. Pakettihävikin
 luokittelu kuuluu nyt Analysis-moduuliin, ja selitystekstit jäävät käyttöliittymään.
-Tietomallien tyyppivihjeet eivät validoi mittausarvoja ajon aikana: yllä kuvatut
-validointipuutteet sekä reititys- ja NetworkManager-ongelmat säilyvät tämän tehtävän
-rajauksen mukaisesti.
+Tietomallien tyyppivihjeet eivät validoi mittausarvoja ajon aikana. Vaiheesta 9 lähtien
+komentotulosteet validoidaan `parsers.py`-moduulissa ennen tietomallien muodostamista.
+Itse muodostetut mallit (esim. GUI:sta) eivät kulje parserien kautta. Reititys- ja
+NetworkManager-ongelmat 1–2 säilyvät vaiheen 9 rajauksen mukaisesti.
+
+Vaiheen 9 rajaukset:
+
+- Hävikin toleranssi on alle yksi prosenttiyksikkö. Hyvin suurilla pakettimäärillä
+  yhden paketin ero voi jäädä toleranssin sisään.
+- `mdev`-arvon suhdetta min/max-arvoihin ei tarkisteta.
+- Ping-yhteenveto vaatii neljä RTT-arvoa, joten BusyBoxin kolmen arvon muoto
+  (`min/avg/max`) tulkitaan virheeksi kuten ennenkin.
+- getent `ahosts`-tulosteen virheelliset rivit ohitetaan.
+- Jos jäsennys epäonnistuu, tuloksessa ei ole osittaisia mittausarvoja.

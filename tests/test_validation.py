@@ -14,7 +14,8 @@ OPTION_LIKE_VALUES = ["-f", "--help", "+trace", "+time=999", "@192.0.2.1"]
 INJECTION_VALUES = [
     "example.com;id", "example.com|id", "example.com&&id", "$(id)", "`id`",
     "example.com>out", "example.com\nid", "example.com\rid", "example.com\0",
-    "example.com\t", " example.com", "example.com ",
+    "example.com\t", " example.com", "example.com ", "example\x1b[31m.com",
+    "example.com\x7f", "example\u00a0.com", "\u0661\u0662\u0663.example",
 ]
 
 
@@ -31,7 +32,8 @@ def test_validation_error_is_diagnostic_error_but_not_command_or_value_error():
     "localhost", "google.com", "example.com.", "IN", "CH", "A", "a",
     "xn--bcher-kva.example", "my-host.example", "host1.example", "1host.example",
     "a" * 63 + ".example", "8.8.8.8", "127.0.0.1", "0.0.0.0", "255.255.255.255",
-    "::1", "2001:db8::1", "::ffff:192.0.2.1", "FE80::1",
+    "::1", "2001:db8::1", "::ffff:192.0.2.1", "FE80::1", "0xdeadbeef.example",
+    "3com", "abc.0x7f", "example.123",
 ])
 def test_validate_host_accepts_hostnames_and_ip_literals(value):
     assert validate_host(value) is None
@@ -150,7 +152,7 @@ def test_validate_command_arguments_rejects_nul_characters(arguments):
         validate_command_arguments(arguments)
 
 
-@pytest.mark.parametrize("timeout", [10, 0.5, 3, 1e-9, 1e300])
+@pytest.mark.parametrize("timeout", [10, 0.5, 3, 1e-9, 60, 60.0])
 def test_validate_timeout_accepts_finite_positive_numbers(timeout):
     assert validate_timeout(timeout) is None
 
@@ -166,3 +168,73 @@ def test_validate_timeout_rejects_invalid_values(timeout):
 def test_validate_timeout_rejects_huge_integer_without_overflow_error():
     with pytest.raises(ValidationError, match="timeout must be"):
         validate_timeout(10 ** 400)
+
+
+@pytest.mark.parametrize("value", [
+    "0x7f", "0X7F.1", "0x7f.0.0.1", "0x7f000001", "1.0x2.3.4", "0x7f.1.", "017.0.0.1",
+])
+def test_validate_host_rejects_alternative_numeric_ipv4_forms(value):
+    with pytest.raises(ValidationError, match="Invalid host"):
+        validate_host(value)
+
+
+@pytest.mark.parametrize("timeout", [60.000001, 61, 1e7, 10 ** 8, 1e300, 10 ** 400])
+def test_validate_timeout_rejects_values_above_maximum(timeout):
+    with pytest.raises(ValidationError, match="timeout must be"):
+        validate_timeout(timeout)
+
+
+@pytest.mark.parametrize("validator, value, expected", [
+    (validate_host, "-f", "Invalid host: '-f' looks like a command option"),
+    (validate_host, "999.1.2.3", "Invalid host: '999.1.2.3'"),
+    (validate_ipv4_address, "-f", "Invalid IPv4 address: '-f'"),
+    (validate_interface_name, "-f", "Invalid interface name: '-f'"),
+    (validate_host, "a" * 64, "Invalid host: '" + "a" * 64 + "'"),
+])
+def test_validation_error_messages_keep_short_values_complete(validator, value, expected):
+    with pytest.raises(ValidationError) as caught:
+        validator(value)
+
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("validator, value, expected", [
+    (validate_host, "a" * 65, "Invalid host: '" + "a" * 64 + "'..."),
+    (validate_host, "-" + "a" * 999, "Invalid host: '-" + "a" * 63 + "'... looks like a command option"),
+    (validate_ipv4_address, "1" * 1000, "Invalid IPv4 address: '" + "1" * 64 + "'..."),
+    (validate_interface_name, "e" * 1000, "Invalid interface name: '" + "e" * 64 + "'..."),
+])
+def test_validation_error_messages_truncate_long_values(validator, value, expected):
+    with pytest.raises(ValidationError) as caught:
+        validator(value)
+
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("validator, prefix", [
+    (validate_host, "Invalid host: "),
+    (validate_ipv4_address, "Invalid IPv4 address: "),
+    (validate_interface_name, "Invalid interface name: "),
+])
+def test_validation_error_messages_escape_control_characters(validator, prefix):
+    value = "\x1b[31m\r\n\0\x7f" + "x" * 100
+
+    with pytest.raises(ValidationError) as caught:
+        validator(value)
+
+    message = str(caught.value)
+    assert message == prefix + "'\\x1b[31m\\r\\n\\x00\\x7f" + "x" * 55 + "'..."
+    for character in ("\x1b", "\r", "\n", "\0", "\x7f"):
+        assert character not in message
+
+
+class ReprForbiddenString(str):
+    def __repr__(self):
+        raise AssertionError("The whole input must not be converted with repr()")
+
+
+def test_validation_error_message_does_not_repr_the_whole_input():
+    with pytest.raises(ValidationError) as caught:
+        validate_host(ReprForbiddenString("a" * 100000 + ";"))
+
+    assert str(caught.value) == "Invalid host: '" + "a" * 64 + "'..."

@@ -2,9 +2,10 @@ import analysis
 import dns
 import network
 import output
+import parsers
 import ping
 
-from exceptions import CommandError, ValidationError
+from exceptions import DiagnosticError
 
 
 def read_menu_choice(max_choice):
@@ -30,7 +31,7 @@ def main():
         try:
             try:
                 network_connected = network.get_network_plugin()
-            except (CommandError, ValidationError) as error:
+            except DiagnosticError as error:
                 output.display_command_error(str(error))
                 network_connected = None
 
@@ -113,7 +114,7 @@ def main():
                     output.clear_screen()
 
                     raw = network.get_listening_sockets()
-                    data = network.parse_ss_output(raw)
+                    data = parsers.parse_ss_output(raw)
                     open_port_data = analysis.get_open_ports(data)
 
                     if submenu_choice == 1:
@@ -151,11 +152,11 @@ def main():
 
                     elif submenu_choice == 2:
                         results = network.nmcli_status()
-                        interface_data = network.parse_nmcli_output(results)
+                        interface_data = parsers.parse_nmcli_output(results)
 
                         output.display_network_interface_status(interface_data)
 
-        except (CommandError, ValidationError) as error:
+        except DiagnosticError as error:
             output.display_command_error(str(error))
 
 

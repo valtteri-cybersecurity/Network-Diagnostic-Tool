@@ -84,29 +84,6 @@ def test_analyze_open_ports_preserves_protocol_and_uses_port_only(protocol):
     ]
 
 
-@pytest.mark.parametrize("port", ["0", "65535", "-1", "65536"])
-def test_analyze_open_ports_currently_accepts_any_integer_port(port):
-    # Current behavior: even out-of-range integers are accepted.
-    result = analysis.analyze_open_ports([ListeningSocket(local_port=port)])
-
-    assert result == [
-        ServiceInfo(
-            protocol="UNKNOWN",
-            local_address="UNKNOWN",
-            port=int(port),
-            service_name="UNKNOWN",
-        ),
-    ]
-
-
-def test_analyze_open_ports_currently_truncates_float_port():
-    result = analysis.analyze_open_ports([ListeningSocket(local_port=22.9)])
-
-    assert result == [
-        ServiceInfo(protocol="UNKNOWN", local_address="UNKNOWN", port=22, service_name="SSH"),
-    ]
-
-
 @pytest.mark.parametrize("latency, expected_status", [
     (0, "EXCELLENT"),
     (19.999, "EXCELLENT"),
@@ -194,12 +171,6 @@ def test_analyze_jitter_with_non_numeric_measurements(minimum, maximum):
         analysis.analyze_jitter(minimum, maximum)
 
 
-def test_analyze_jitter_currently_accepts_reversed_measurements():
-    result = analysis.analyze_jitter(20, 10)
-
-    assert result == "Excellent"
-
-
 def test_get_open_ports_filters_states_and_normalizes_case():
     rows = [
         ListeningSocket(protocol="tCp", state="listen", local_address="0.0.0.0", local_port="22"),
@@ -273,14 +244,6 @@ def test_get_known_ports_returns_an_independent_dictionary():
     assert 65000 not in second
 
 
-def test_latency_classifiers_currently_accept_negative_measurements():
-    dns_result = analysis.dns_latency_analyzation(DnsLatencyResult(dns_latency_ms=-1))
-    ping_result = analysis.ping_latency_analyzation(PingResult(avg_rtt_ms=-1))
-
-    assert dns_result == LatencyAnalysis(latency_ms=-1, status="EXCELLENT")
-    assert ping_result == "Excellent"
-
-
 def test_get_open_ports_keeps_peer_information_and_wildcard_ports():
     socket = ListeningSocket(
         protocol="udp",
@@ -313,3 +276,38 @@ def test_analyze_packet_loss_preserves_existing_classification_rules(loss, expec
     result = analysis.analyze_packet_loss(loss)
 
     assert result is expected
+
+
+@pytest.mark.parametrize("port", ["0", "-1", "65536", "+22", " 22", "22.0", "", 22.9, 0, -1, 65536, None, True])
+def test_analyze_open_ports_skips_invalid_or_out_of_range_ports(port):
+    result = analysis.analyze_open_ports([ListeningSocket(local_port=port)])
+
+    assert result == []
+
+
+@pytest.mark.parametrize("port, service", [("1", "UNKNOWN"), ("22", "SSH"), ("65535", "UNKNOWN"), (1, "UNKNOWN"), (65535, "UNKNOWN")])
+def test_analyze_open_ports_accepts_port_range_limits(port, service):
+    result = analysis.analyze_open_ports([ListeningSocket(local_port=port)])
+
+    assert result == [
+        ServiceInfo(protocol="UNKNOWN", local_address="UNKNOWN", port=int(port), service_name=service),
+    ]
+
+
+@pytest.mark.parametrize("value", [-1, -0.001, float("nan"), float("inf"), float("-inf")])
+def test_latency_classifiers_reject_negative_or_non_finite_measurements(value):
+    with pytest.raises(ValueError, match="latency must be a finite non-negative number"):
+        analysis.dns_latency_analyzation(DnsLatencyResult(dns_latency_ms=value))
+    with pytest.raises(ValueError, match="latency must be a finite non-negative number"):
+        analysis.ping_latency_analyzation(PingResult(avg_rtt_ms=value))
+
+
+@pytest.mark.parametrize("minimum, maximum, message", [
+    (20, 10, "RTT range requires minimum <= maximum"),
+    (-1, 10, "latency must be a finite non-negative number"),
+    (0, float("inf"), "latency must be a finite non-negative number"),
+    (float("nan"), 10, "latency must be a finite non-negative number"),
+])
+def test_analyze_jitter_rejects_reversed_negative_or_non_finite_measurements(minimum, maximum, message):
+    with pytest.raises(ValueError, match=message):
+        analysis.analyze_jitter(minimum, maximum)

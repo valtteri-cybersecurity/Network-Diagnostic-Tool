@@ -9,6 +9,10 @@ class ValidationError(DiagnosticError):
     """Raised when an input is rejected before any command is executed."""
 
 
+class ParsingError(DiagnosticError):
+    """Raised when command output is malformed, contradictory or implausible."""
+
+
 class CommandError(DiagnosticError):
     def __init__(
         self, message: str, *, arguments: Optional[list[str]] = None,
