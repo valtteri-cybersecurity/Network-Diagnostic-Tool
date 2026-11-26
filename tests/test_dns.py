@@ -5,7 +5,7 @@ from unittest.mock import Mock, call
 import pytest
 
 import dns
-from exceptions import CommandError
+from exceptions import CommandError, ValidationError
 from models import (
     CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
 )
@@ -203,7 +203,7 @@ def test_dns_latency_parses_response_and_uses_bounded_dig_query(
         execution_status=ExecutionStatus.COMPLETED,
         answer_count=2 if status == "NOERROR" else 0,
     )
-    command.assert_called_once_with(["dig", "+time=3", "+tries=1", "+stats", site])
+    command.assert_called_once_with(["dig", "+time=3", "+tries=1", "+stats", "-q", site])
 
 
 @pytest.mark.parametrize("old_text, new_text, status, latency, answers, resolved", [
@@ -377,5 +377,49 @@ def test_dns_latency_integrates_shared_runner(
         answer_count=2 if status == "NOERROR" else 0,
     )
     subprocess_run.assert_called_once()
-    assert subprocess_run.call_args.args[0] == ["dig", "+time=3", "+tries=1", "+stats", "example.com"]
+    assert subprocess_run.call_args.args[0] == ["dig", "+time=3", "+tries=1", "+stats", "-q", "example.com"]
     assert subprocess_run.call_args.kwargs["timeout"] == 10
+
+
+INVALID_DNS_TARGETS = [
+    "", "-f", "--help", "+trace", "+time=999", "@192.0.2.1", "999.1.2.3",
+    "fe80::1%eth0", "example.com;id", "example.com\nid", "example.com\0", None,
+]
+
+
+@pytest.mark.parametrize("function", [dns.dns_run, dns.dns_query, dns.ipv_check, dns.dns_latency])
+@pytest.mark.parametrize("site", INVALID_DNS_TARGETS)
+def test_dns_functions_reject_invalid_targets_before_running_commands(function, site, subprocess_run):
+    with pytest.raises(ValidationError):
+        function(site)
+
+    subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize("site", ["IN", "CH", "A", "localhost", "example.com.", "192.0.2.1", "2001:db8::1"])
+def test_dns_latency_passes_valid_single_label_and_literal_names_as_query_name(site, subprocess_run):
+    raw = (FIXTURE_DIRECTORY / "dig_noerror.txt").read_text(encoding="utf-8")
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, raw, "")
+
+    result = dns.dns_latency(site)
+
+    assert result.hostname == site
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    subprocess_run.assert_called_once()
+    assert subprocess_run.call_args.args[0] == ["dig", "+time=3", "+tries=1", "+stats", "-q", site]
+
+
+@pytest.mark.parametrize("site", ["IN", "localhost", "example.com."])
+def test_dns_run_and_ipv_check_accept_valid_single_label_and_trailing_dot_names(site, subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 2, "", "")
+
+    query = dns.dns_query(site)
+    addresses = dns.ipv_check(site)
+
+    assert query.hostname == site
+    assert addresses.hostname == site
+    assert [item.args[0] for item in subprocess_run.call_args_list] == [
+        ["getent", "hosts", site], ["getent", "ahostsv4", site], ["getent", "ahostsv6", site],
+    ]

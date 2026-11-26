@@ -3,6 +3,7 @@ from exceptions import CommandError, CommandTimeoutError, DiagnosticError
 from models import CommandResult, ExecutionStatus, PingResult
 from network import get_gateway
 from analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
+from validation import validate_host, validate_ipv4_address
 
 
 PING_TIMEOUT = 10
@@ -10,6 +11,7 @@ PING_COUNT = 3
 
 
 def _run_ping(target: str) -> CommandResult:
+    validate_host(target)
     return run_command(
         ["ping", "-n", "-c", str(PING_COUNT), target],
         allowed_codes=(0, 1), timeout=PING_TIMEOUT,
@@ -24,6 +26,7 @@ def ping_gateway() -> CommandResult:
     gateway = get_gateway()
     if gateway is None:
         raise DiagnosticError("Could not detect the default gateway.")
+    validate_ipv4_address(gateway)
     return _run_ping(gateway)
 
 
@@ -36,6 +39,11 @@ def ping_internet() -> CommandResult:
 
 
 def ping_target(target: str) -> PingResult:
+    if not isinstance(target, str):
+        return PingResult(
+            target=str(target), error=f"Invalid ping target type: {type(target).__name__}",
+        )
+
     targets = {
         "localhost": ping_localhost,
         "gateway": ping_gateway,

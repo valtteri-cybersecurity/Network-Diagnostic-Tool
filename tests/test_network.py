@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 import network
-from exceptions import CommandError
+from exceptions import CommandError, ValidationError
 from models import CommandResult, ListeningSocket, NetworkInterface
 
 
@@ -491,3 +491,18 @@ def test_parse_ss_output_preserves_wildcard_local_port():
         peer_address="*",
         peer_port="*",
     )]
+
+
+@pytest.mark.parametrize("interface", ["-f", "--help", "a" * 16, "eth0;id", "+eth0", "..", "ethö"])
+def test_get_ip_rejects_invalid_route_interface_before_address_command(interface, subprocess_run):
+    with pytest.raises(ValidationError, match="Invalid interface name"):
+        network.get_ip([f"default via 192.0.2.1 dev {interface}"])
+
+    subprocess_run.assert_not_called()
+
+
+def test_get_ip_validates_interface_only_when_address_command_is_needed(subprocess_run):
+    result = network.get_ip(["default via 192.0.2.1 dev -f src 192.0.2.10"])
+
+    assert result == "192.0.2.10"
+    subprocess_run.assert_not_called()

@@ -1,5 +1,6 @@
 from command_runner import run_command
 from models import ListeningSocket, NetworkInterface
+from validation import validate_interface_name
 
 
 def nmcli_status():
@@ -159,6 +160,7 @@ def get_ip(route_data):
     if interface is None:
         return None
 
+    validate_interface_name(interface)
     result = run_command(
         ["ip", "-4", "-o", "addr", "show", "dev", interface]
     )

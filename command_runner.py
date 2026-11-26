@@ -1,10 +1,10 @@
-import math
 import os
 import subprocess
 import time
 
 from exceptions import CommandExecutionError, CommandNotFoundError, CommandTimeoutError
 from models import CommandResult
+from validation import validate_command_arguments, validate_timeout
 
 
 def command_environment() -> dict[str, str]:
@@ -16,14 +16,8 @@ def command_environment() -> dict[str, str]:
 def run_command(
     arguments: list[str], allowed_codes: tuple[int, ...] = (0,), timeout: float = 10,
 ) -> CommandResult:
-    if (
-        not isinstance(arguments, list) or not arguments
-        or not all(isinstance(argument, str) for argument in arguments)
-        or not arguments[0]
-    ):
-        raise ValueError("arguments must be a non-empty list of strings with a command name")
-    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be a finite positive number")
+    validate_command_arguments(arguments)
+    validate_timeout(timeout)
 
     arguments = list(arguments)
     started = time.monotonic()

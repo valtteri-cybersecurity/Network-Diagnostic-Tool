@@ -58,6 +58,8 @@ Network and DNS commands have a 10-second execution limit. Ping also has a 10-se
 
 Missing commands, command failures, and timeouts are reported to the user. Network and DNS execution errors return to the main menu. If NetworkManager status is unavailable, the main menu remains accessible.
 
+Inputs that are rejected before a command runs raise `ValidationError`. The CLI reports them like other expected errors and returns to the main menu; ping reports them as a failed `PingResult`.
+
 A hostname not found by getent is reported as an unsuccessful lookup. DNS response codes such as NXDOMAIN are displayed separately from response time: a fast response does not necessarily mean that the requested name exists.
 
 ## Project structure
@@ -66,7 +68,8 @@ A hostname not found by getent is reported as an unsuccessful lookup. DNS respon
 | --- | --- |
 | main.py | Menu navigation and coordination |
 | command_runner.py | Safe command execution, timeouts, and execution timing |
-| exceptions.py | Shared diagnostic and command exceptions |
+| exceptions.py | Shared diagnostic, validation, and command exceptions |
+| validation.py | Input validation before commands are executed |
 | models.py | Typed command, diagnostic, socket, interface, and analysis data models |
 | network.py | Network data collection and output parsing |
 | ping.py | UI-independent ping execution, statistics parsing, and analysis coordination |
@@ -75,7 +78,7 @@ A hostname not found by getent is reported as an unsuccessful lookup. DNS respon
 | output.py | Menus, reports, error messages, and screen output |
 
 The diagnostic engine consists of `ping`, `dns`, `network`, `analysis`, `models`,
-`exceptions`, and `command_runner`. It executes commands, parses their output,
+`exceptions`, `validation`, and `command_runner`. It executes commands, parses their output,
 builds result models, and classifies measurements. It never prints, prompts,
 clears the screen, or imports `main` or `output`. Importing modules runs no commands.
 
@@ -87,7 +90,8 @@ or run diagnostics. All print calls and terminal clearing remain in `output.py`.
 Dependencies flow from CLI to engine: `main` calls diagnostic/analysis functions
 and `output`; `output` uses only the shared models and standard-library formatting.
 `ping` uses `network`, `analysis`, and the command runner; `dns` and `network` use
-the runner; `analysis` uses models. The runner uses models and shared exceptions.
+the runner; `analysis` uses models. `ping`, `dns`, `network`, and the runner use
+`validation`, which depends only on shared exceptions. The runner uses models and shared exceptions.
 There are no engine-to-CLI dependencies or circular imports. A future GUI can
 call the same engine functions and render the same results without CLI imports.
 
@@ -98,7 +102,41 @@ Network, DNS, and ping diagnostics use the UI-independent `command_runner`.
 of string arguments, runs without a shell, and returns `CommandResult` with
 `arguments`, `stdout`, `stderr`, `return_code`, and `duration_seconds` measured
 with `time.monotonic()`. The environment is copied with `LC_ALL=C`; the timeout
-must be a finite positive number.
+must be a finite positive number. Invalid arguments (not a non-empty list of
+strings, an empty program name, or any NUL character) and invalid timeouts
+(non-numeric, boolean, zero, negative, NaN, infinite, or too large for a float)
+raise `ValidationError` before `subprocess.run()` is called. Later empty arguments
+and spaces are allowed.
+
+## Input validation
+
+`validation.py` provides validators that return `None` for an accepted value and
+raise `ValidationError(DiagnosticError)` otherwise. They never modify the value.
+`ValidationError` is not a `CommandError`: no command was executed.
+
+| Validator | Accepts |
+| --- | --- |
+| `validate_host(value)` | IPv4 and IPv6 literals and ASCII hostnames (labels of 1-63 letters, digits, and inner hyphens; at most 253 characters, plus one optional trailing dot). Single-label names and punycode are allowed. |
+| `validate_ipv4_address(value)` | Four-part dotted-decimal IPv4 addresses without leading zeros. |
+| `validate_interface_name(value)` | 1-15 ASCII letters, digits, `_`, `.`, or `-`; not starting with `-` and not `.` or `..`. |
+| `validate_command_arguments(arguments)` | A non-empty list of strings with a non-empty program name and no NUL characters. |
+| `validate_timeout(timeout)` | A positive, finite `int` or `float` (not `bool`). |
+
+`validate_host` rejects empty values, whitespace and control characters, URIs,
+CIDR prefixes, ports, brackets, IPv6 scope IDs, Unicode names, values starting
+with `-`, `+`, or `@`, and digit-and-dot values that are not valid IPv4 addresses
+(such as `999.1.2.3`).
+
+Validation happens immediately before each command: `dns_run()`, `ipv_check()`,
+and `dns_latency()` validate the host; `dns_latency()` passes it to dig after `-q`.
+Ping validates its target, and the gateway read from the routing table must be an
+IPv4 address. `get_ip()` validates the interface name taken from the routing table
+before running `ip ... addr show dev`. Other route, `src`, DNS, and socket output is
+not validated in this phase.
+
+The interface name rule is conservative: Linux allows some longer-looking or
+non-ASCII names that are rejected here. A valid timeout does not limit command
+duration by itself; the per-command timeouts described above still apply.
 
 Technical failures raise `CommandNotFoundError`, `CommandTimeoutError`, or
 `CommandExecutionError`, all derived from `CommandError` and `DiagnosticError`.
@@ -180,8 +218,8 @@ they do not replace the established exception contract. An unparseable DNS respo
 status yields a failed `DnsLatencyResult`, while a known DNS response code can be
 completed even when timing or answer-count information is unavailable.
 
-Routing remains based on the current text output from `ip`; no route model or
-new validation rules are introduced in this phase.
+Routing remains based on the current text output from `ip`; no route model is
+introduced. Only the interface name and gateway taken from it are validated.
 
 ## Measurement limits
 
@@ -216,7 +254,7 @@ python -m pytest -v
 Measure line and branch coverage for the whole application:
 
 ```bash
-python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov-branch --cov-report=term-missing
+python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov-branch --cov-report=term-missing
 ```
 
 Tests are in `tests/`, with reusable command output in `tests/fixtures/`.
@@ -230,8 +268,8 @@ Report tests check that rendering neither mutates data nor executes commands.
 
 ## Validation
 
-The automated tests cover parsing, analysis, command errors and timeouts, CLI
-navigation, and report contents. Some tests explicitly preserve known incorrect
+The automated tests cover parsing, analysis, input validation, command errors and
+timeouts, CLI navigation, and report contents. Some tests explicitly preserve known incorrect
 behavior to protect the current implementation during refactoring; see
 [known issues](tests/KNOWN_ISSUES.md). Passing tests do not mean those issues are fixed.
 

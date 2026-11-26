@@ -5,6 +5,10 @@ class DiagnosticError(Exception):
     pass
 
 
+class ValidationError(DiagnosticError):
+    """Raised when an input is rejected before any command is executed."""
+
+
 class CommandError(DiagnosticError):
     def __init__(
         self, message: str, *, arguments: Optional[list[str]] = None,

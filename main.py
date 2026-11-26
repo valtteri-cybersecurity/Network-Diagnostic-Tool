@@ -4,7 +4,7 @@ import network
 import output
 import ping
 
-from exceptions import CommandError
+from exceptions import CommandError, ValidationError
 
 
 def read_menu_choice(max_choice):
@@ -30,7 +30,7 @@ def main():
         try:
             try:
                 network_connected = network.get_network_plugin()
-            except CommandError as error:
+            except (CommandError, ValidationError) as error:
                 output.display_command_error(str(error))
                 network_connected = None
 
@@ -155,7 +155,7 @@ def main():
 
                         output.display_network_interface_status(interface_data)
 
-        except CommandError as error:
+        except (CommandError, ValidationError) as error:
             output.display_command_error(str(error))
 
 

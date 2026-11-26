@@ -7,7 +7,7 @@ import pytest
 import command_runner
 from exceptions import (
     DiagnosticError, CommandError, CommandNotFoundError,
-    CommandTimeoutError, CommandExecutionError,
+    CommandTimeoutError, CommandExecutionError, ValidationError,
 )
 from models import CommandResult
 
@@ -195,20 +195,47 @@ def test_command_error_can_be_created_with_message_only():
     assert error.timeout is None
 
 
-@pytest.mark.parametrize("arguments", ["hostname", [], [1], [""], None])
+@pytest.mark.parametrize("arguments", ["hostname", [], [1], [""], None, ("hostname",)])
 def test_run_command_rejects_invalid_argument_lists_before_execution(arguments, subprocess_run):
-    with pytest.raises(ValueError, match="arguments must be"):
+    with pytest.raises(ValidationError, match="arguments must be a non-empty list"):
         command_runner.run_command(arguments)
 
     subprocess_run.assert_not_called()
 
 
-@pytest.mark.parametrize("timeout", [None, 0, -1, float("inf"), float("nan"), "10"])
+@pytest.mark.parametrize("timeout", [None, 0, -1, float("inf"), float("nan"), "10", True, False, 10 ** 400])
 def test_run_command_rejects_missing_or_invalid_timeout(timeout, subprocess_run):
-    with pytest.raises(ValueError, match="timeout must be"):
+    with pytest.raises(ValidationError, match="timeout must be"):
         command_runner.run_command(["hostname"], timeout=timeout)
 
     subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [["hostname\0"], ["ping", "-c", "3", "127.0.0.1\0"]])
+def test_run_command_rejects_nul_characters_before_execution(arguments, subprocess_run):
+    with pytest.raises(ValidationError, match="arguments must not contain NUL"):
+        command_runner.run_command(arguments)
+
+    subprocess_run.assert_not_called()
+
+
+def test_run_command_validation_error_is_not_a_command_error(subprocess_run):
+    with pytest.raises(ValidationError) as caught:
+        command_runner.run_command([""])
+
+    assert isinstance(caught.value, DiagnosticError)
+    assert not isinstance(caught.value, CommandError)
+    subprocess_run.assert_not_called()
+
+
+def test_run_command_allows_empty_later_arguments_and_spaces(subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, "ok", "")
+
+    result = command_runner.run_command(["printf", "", "two words"])
+
+    assert result.arguments == ["printf", "", "two words"]
+    assert subprocess_run.call_args.args[0] == ["printf", "", "two words"]
 
 
 def test_shared_fixture_blocks_unconfigured_command_execution(subprocess_run):

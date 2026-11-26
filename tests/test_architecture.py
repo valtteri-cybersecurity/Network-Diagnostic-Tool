@@ -14,7 +14,9 @@ def test_engine_imports_and_ping_diagnostic_work_without_ui_modules(
 ):
     import subprocess
 
-    engine_names = ["models", "exceptions", "command_runner", "network", "analysis", "dns", "ping"]
+    engine_names = [
+        "models", "exceptions", "validation", "command_runner", "network", "analysis", "dns", "ping",
+    ]
     read_input = Mock(side_effect=AssertionError("Engine must not request input"))
     monkeypatch.setattr("builtins.input", read_input)
     fixture_name = "total_loss.txt" if scenario == "total_loss" else "success.txt"
@@ -75,4 +77,51 @@ def test_engine_imports_and_ping_diagnostic_work_without_ui_modules(
     assert captured.err == ""
     read_input.assert_not_called()
     subprocess_run.assert_called_once()
+    system_command.assert_not_called()
+
+
+def test_engine_rejects_invalid_input_without_commands_output_or_ui_modules(
+    monkeypatch, subprocess_run, system_command, capsys,
+):
+    import subprocess
+
+    engine_names = [
+        "models", "exceptions", "validation", "command_runner", "network", "analysis", "dns", "ping",
+    ]
+    read_input = Mock(side_effect=AssertionError("Engine must not request input"))
+    monkeypatch.setattr("builtins.input", read_input)
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 0, "default via -f dev enp3s0\n", "")
+
+    with patch.dict(sys.modules):
+        for name in engine_names:
+            sys.modules.pop(name, None)
+        sys.modules["main"] = None
+        sys.modules["output"] = None
+
+        modules = {name: importlib.import_module(name) for name in engine_names}
+        validation_error = modules["exceptions"].ValidationError
+
+        assert issubclass(validation_error, modules["exceptions"].DiagnosticError)
+        assert not issubclass(validation_error, modules["exceptions"].CommandError)
+        with pytest.raises(validation_error):
+            modules["dns"].dns_latency("+trace")
+        with pytest.raises(validation_error):
+            modules["command_runner"].run_command(["ping", "127.0.0.1\0"])
+        subprocess_run.assert_not_called()
+
+        result = modules["ping"].run_ping_diagnostic("gateway")
+
+        assert isinstance(result, modules["models"].PingResult)
+        assert result.execution_status is modules["models"].ExecutionStatus.FAILED
+        assert result.error == "Invalid IPv4 address: '-f'"
+        assert sys.modules["main"] is None
+        assert sys.modules["output"] is None
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    read_input.assert_not_called()
+    subprocess_run.assert_called_once()
+    assert subprocess_run.call_args.args[0] == ["ip", "-4", "route"]
     system_command.assert_not_called()

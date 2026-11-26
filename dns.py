@@ -3,9 +3,11 @@ import re
 
 from command_runner import run_command
 from models import CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus
+from validation import validate_host
 
 
 def dns_run(site: str) -> CommandResult:
+    validate_host(site)
     return run_command(
         ["getent", "hosts", site],
         allowed_codes=(0, 2)
@@ -13,6 +15,7 @@ def dns_run(site: str) -> CommandResult:
 
 
 def ipv_check(site: str) -> DnsAddressResult:
+    validate_host(site)
     addresses = DnsAddressResult(hostname=site, execution_status=ExecutionStatus.COMPLETED)
 
     for address_list, database, version in (
@@ -61,8 +64,10 @@ def dns_query(site: str) -> DnsQueryResult:
 
 
 def dns_latency(site: str) -> DnsLatencyResult:
+    validate_host(site)
+    # -q makes dig treat valid single-label names such as IN or A as the query name.
     result = run_command(
-        ["dig", "+time=3", "+tries=1", "+stats", site]
+        ["dig", "+time=3", "+tries=1", "+stats", "-q", site]
     )
 
     status_match = re.search(

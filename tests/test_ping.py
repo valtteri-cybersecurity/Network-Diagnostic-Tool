@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from exceptions import CommandError, CommandExecutionError, DiagnosticError
+from exceptions import CommandError, CommandExecutionError, DiagnosticError, ValidationError
 from models import CommandResult, ExecutionStatus, PacketLossStatus, PingResult
 import ping
 
@@ -637,3 +637,57 @@ def test_run_ping_diagnostic_analyzes_zero_rtt_instead_of_treating_it_as_missing
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("target", [
+    "", "-f", "--help", "+trace", "@192.0.2.1", "999.1.2.3", "fe80::1%eth0",
+    "example.com;id", "example.com\nid", "example.com\0", None,
+])
+def test_run_ping_rejects_invalid_target_before_running_command(target, subprocess_run):
+    with pytest.raises(ValidationError):
+        ping._run_ping(target)
+
+    subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize("gateway", [
+    "-f", "--help", "gateway.example", "999.1.2.3", "2001:db8::1", "192.0.2.1;id", "",
+])
+def test_ping_gateway_rejects_non_ipv4_gateway_without_running_ping(gateway, monkeypatch):
+    run_ping = Mock(side_effect=AssertionError("No ping expected"))
+    monkeypatch.setattr(ping, "get_gateway", Mock(return_value=gateway))
+    monkeypatch.setattr(ping, "_run_ping", run_ping)
+
+    with pytest.raises(ValidationError):
+        ping.ping_gateway()
+
+    run_ping.assert_not_called()
+
+
+def test_ping_target_reports_invalid_route_gateway_after_route_query_only(subprocess_run, capsys):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess(
+        [], 0, "default via -f dev enp3s0\n", "",
+    )
+
+    result = ping.run_ping_diagnostic("gateway")
+
+    assert result.target == "gateway"
+    assert result.execution_status is ExecutionStatus.FAILED
+    assert result.error.startswith("Invalid IPv4 address")
+    assert result.raw_output == ""
+    assert result.reachable is None
+    assert result.latency_analysis is None
+    subprocess_run.assert_called_once()
+    assert subprocess_run.call_args.args[0] == ["ip", "-4", "route"]
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("target", [None, 1, ["gateway"], {"internet": 1}])
+def test_ping_target_reports_wrong_selector_type_without_running_command(target, subprocess_run):
+    result = ping.ping_target(target)
+
+    assert result.execution_status is ExecutionStatus.FAILED
+    assert result.target == str(target)
+    assert result.error == f"Invalid ping target type: {type(target).__name__}"
+    subprocess_run.assert_not_called()

@@ -12,7 +12,9 @@ from models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     LatencyAnalysis, ListeningSocket, NetworkInterface, PingResult, ServiceInfo, SocketCounts,
 )
-from exceptions import CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError
+from exceptions import (
+    CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError,
+)
 
 
 @pytest.fixture
@@ -322,7 +324,7 @@ def test_main_displays_networkmanager_interfaces(user_input, monkeypatch):
     display.assert_called_once_with(interfaces)
 
 
-@pytest.mark.parametrize("error_type", [CommandNotFoundError, CommandTimeoutError, CommandExecutionError])
+@pytest.mark.parametrize("error_type", [CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError])
 def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeypatch):
     user_input.side_effect = ["1", "5", "5"]
     status = Mock(side_effect=[error_type("nmcli unavailable"), False])
@@ -347,7 +349,7 @@ def test_main_recovers_from_networkmanager_error(error_type, user_input, monkeyp
     ("4", "1", main.network, "get_ip_route"),
     ("4", "2", main.network, "nmcli_status"),
 ])
-@pytest.mark.parametrize("error_type", [CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError])
+@pytest.mark.parametrize("error_type", [CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, ValidationError])
 def test_main_returns_to_main_menu_after_diagnostic_error(
     menu, action, module, function_name, error_type, user_input, monkeypatch,
 ):
@@ -549,3 +551,22 @@ def test_main_can_run_another_diagnostic_after_raised_command_error(user_input, 
     ping_diagnostic.assert_called_once_with("localhost")
     display_report.assert_called_once_with(report)
     assert user_input.call_count == 6
+
+
+def test_main_reports_invalid_route_interface_without_address_command(user_input, subprocess_run, capsys):
+    user_input.side_effect = ["4", "1", "5"]
+    responses = {
+        "ip": subprocess.CompletedProcess([], 0, "default via 192.0.2.1 dev -f\n", ""),
+        "hostname": subprocess.CompletedProcess([], 0, "workstation\n", ""),
+    }
+    subprocess_run.side_effect = lambda arguments, **kwargs: responses[arguments[0]]
+
+    main.main()
+
+    output = capsys.readouterr().out
+    assert "Error: Invalid interface name: '-f'" in output
+    assert user_input.call_count == 3
+    assert main.output.mainmenu1.call_count == 2
+    assert [item.args[0] for item in subprocess_run.call_args_list] == [
+        ["ip", "-4", "route"], ["hostname"],
+    ]
