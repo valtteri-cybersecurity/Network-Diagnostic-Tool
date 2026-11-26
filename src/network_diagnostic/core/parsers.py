@@ -10,9 +10,9 @@ import ipaddress
 import re
 from typing import Callable, Optional
 
-from exceptions import ParsingError, ValidationError
-from models import DnsLatencyResult, ExecutionStatus, ListeningSocket, NetworkInterface, PingResult
-from validation import validate_interface_name, validate_ipv4_address
+from network_diagnostic.core.exceptions import ParsingError, ValidationError
+from network_diagnostic.core.models import DnsLatencyResult, ExecutionStatus, ListeningSocket, NetworkInterface, PingResult
+from network_diagnostic.core.validation import validate_interface_name, validate_ipv4_address
 
 
 MAX_PORT = 65535
@@ -281,20 +281,25 @@ def split_nmcli_fields(line: str) -> list[str]:
 def parse_nmcli_output(lines: list[str]) -> list[NetworkInterface]:
     """Return interfaces from DEVICE,TYPE,STATE,CONNECTION lines.
 
-    Lines with a wrong field count or without a device or state are skipped.
+    Empty lines are skipped. Any other line with a wrong field count or without
+    a device or state raises ParsingError, so that a partial interface list is
+    never reported as complete.
     """
     parsed = []
 
     for line in lines:
+        if not line.strip():
+            continue
+
         parts = split_nmcli_fields(line)
 
         if len(parts) != 4:
-            continue
+            raise ParsingError("Unrecognized line in nmcli output")
 
         device, interface_type, state, connection = parts
 
         if not device or not state:
-            continue
+            raise ParsingError("Unrecognized line in nmcli output")
 
         parsed.append(NetworkInterface(
             device=device, interface_type=interface_type,
@@ -305,14 +310,21 @@ def parse_nmcli_output(lines: list[str]) -> list[NetworkInterface]:
 
 
 def parse_nmcli_states(output: str) -> list[tuple[str, str]]:
-    """Return (device, state) pairs from DEVICE,STATE lines, skipping malformed lines."""
+    """Return (device, state) pairs from DEVICE,STATE lines.
+
+    Empty lines are skipped. Any other malformed line raises ParsingError, so
+    that unknown output is not reported as "no connected interface".
+    """
     states = []
 
     for line in output.splitlines():
+        if not line.strip():
+            continue
+
         parts = split_nmcli_fields(line)
 
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            continue
+            raise ParsingError("Unrecognized line in nmcli output")
 
         states.append((parts[0], parts[1]))
 
@@ -409,7 +421,13 @@ def select_default_route(route_lines: list[str]) -> Optional[list[str]]:
     metric has metric 0, and the first listed route wins a tie. A line that ends
     with a keyword without its value is incomplete and skipped. Typed routes such
     as `unreachable default` do not start with `default` and are not candidates.
+    A route marked `dead` is never used by the kernel and is skipped. A `linkdown`
+    route is kept: the kernel uses it unless ignore_routes_with_linkdown is set.
     Gateway, interface and source address are all read from this one route.
+
+    Raises ParsingError when the selected route has no `dev`, such as a multipath
+    route (indented `nexthop` lines) or a nexthop group (`nhid`): it has no single
+    gateway or interface. Policy routing rules are not evaluated.
     """
     selected = None
     selected_metric = 0
@@ -418,6 +436,9 @@ def select_default_route(route_lines: list[str]) -> Optional[list[str]]:
         parts = line.split()
 
         if not parts or parts[0] != "default" or parts[-1] in _ROUTE_KEYWORDS:
+            continue
+
+        if "dead" in parts:
             continue
 
         metric = 0
@@ -430,6 +451,11 @@ def select_default_route(route_lines: list[str]) -> Optional[list[str]]:
         if selected is None or metric < selected_metric:
             selected = parts
             selected_metric = metric
+
+    if selected is not None and "dev" not in selected:
+        raise ParsingError(
+            "Unsupported default route: no single output interface (for example, a multipath route)"
+        )
 
     return selected
 

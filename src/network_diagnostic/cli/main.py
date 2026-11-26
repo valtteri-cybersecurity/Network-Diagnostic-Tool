@@ -1,7 +1,7 @@
-import diagnostic_service
-import output
+from network_diagnostic import diagnostic_service
+from network_diagnostic.cli import output
 
-from exceptions import DiagnosticError
+from network_diagnostic.core.exceptions import DiagnosticError
 
 
 def read_menu_choice(max_choice):
@@ -143,7 +143,8 @@ def main():
             output.display_command_error(str(error))
 
 
-if __name__ == "__main__":
+def run():
+    """Command-line entry point used by network-diagnostic and python -m."""
     try:
         main()
     except (KeyboardInterrupt, EOFError):

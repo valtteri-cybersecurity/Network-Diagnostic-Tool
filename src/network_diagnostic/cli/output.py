@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from models import (
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     LatencyAnalysis, ListeningSocket, NetworkInterface, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
 )
@@ -10,6 +10,22 @@ from models import (
 
 MENU_WIDTH = 60
 MENU_INDENT = "    "
+
+
+def printable(value) -> str:
+    """Return str(value) with non-printable characters except tab shown as escapes.
+
+    Text from commands and the system, such as connection names or command
+    error output, may contain terminal control sequences. They are shown as
+    text (for example, \\x1b) instead of being executed by the terminal.
+    """
+    characters = []
+    for character in str(value):
+        if character.isprintable() or character == "\t":
+            characters.append(character)
+        else:
+            characters.append(repr(character)[1:-1])
+    return "".join(characters)
 
 
 def clear_screen():
@@ -36,7 +52,7 @@ def mainmenu1(network_connected):
     elif network_connected:
         status = "Connected interface detected"
     else:
-        status = "No connected interface detected"
+        status = "NetworkManager reports no connected interface"
 
     print()
     print(f"Date   : {date}")
@@ -112,7 +128,7 @@ def display_menu_error(max_choice):
 
 def display_command_error(message):
     print()
-    print(f"Error: {message}")
+    print(f"Error: {printable(message)}")
     print()
 
 
@@ -130,10 +146,11 @@ def dns_output_header(title):
 
 def display_ping_result(result: PingResult) -> None:
     if result.raw_output:
-        print(result.raw_output)
+        for line in result.raw_output.splitlines():
+            print(printable(line))
         print()
     if result.error is not None:
-        print(f"Error: {result.error}")
+        print(f"Error: {printable(result.error)}")
 
 
 def display_ping_report(result: PingResult) -> None:
@@ -148,7 +165,7 @@ def display_ping_report(result: PingResult) -> None:
         PacketLossStatus.INVALID: "Invalid packet loss value.",
     }
     if result.error is not None:
-        reason = result.error
+        reason = printable(result.error)
     elif result.packet_loss_status is PacketLossStatus.TOTAL_LOSS and result.icmp_errors:
         reason = (
             f"No replies were received, but {result.icmp_errors} ICMP error messages were "
@@ -182,7 +199,7 @@ def display_ping_report(result: PingResult) -> None:
         else:
             print(f"{key:<20}: {value}")
     if result.error is not None:
-        print(f"{'error':<20}: {result.error}")
+        print(f"{'error':<20}: {printable(result.error)}")
 
     print()
     latency = result.latency_analysis if result.latency_analysis is not None else "Not available"
@@ -203,7 +220,7 @@ def dns_query_output(result: DnsQueryResult):
     print(f"Status    : {status}")
     print(f"IP address: {result.ip_address or 'No address found'}")
     if result.error is not None:
-        print(f"Error     : {result.error}")
+        print(f"Error     : {printable(result.error)}")
     print()
 
 
@@ -216,7 +233,7 @@ def dns_latency_output(result: DnsLatencyResult, analysis: Optional[LatencyAnaly
     print(f"DNS status: {result.dns_status or 'UNKNOWN'}")
     print(f"Resolved  : {resolved}")
     if result.error is not None:
-        print(f"Error     : {result.error}")
+        print(f"Error     : {printable(result.error)}")
 
     if latency is None:
         print("Latency   : Measurement unavailable")
@@ -236,6 +253,9 @@ def dns_latency_output(result: DnsLatencyResult, analysis: Optional[LatencyAnaly
         print("Status    : Measurement failed")
     print(f"Latency   : {latency:.2f} ms")
     print(f"Analysis  : {descriptions.get(status, status)}")
+    # dig asks the server in /etc/resolv.conf, often a local caching resolver
+    # such as systemd-resolved (127.0.0.53). A cached answer is not upstream latency.
+    print("Note      : Measured to the configured DNS server, which may be a local cache")
     print()
 
 
@@ -257,7 +277,7 @@ def ipv_check_output(result: DnsAddressResult):
     else:
         print(f"IPv6 addresses: {empty}")
     if result.error is not None:
-        print(f"Error    : {result.error}")
+        print(f"Error    : {printable(result.error)}")
     print()
 
 
@@ -304,8 +324,8 @@ def display_open_ports(open_port_data: list[ListeningSocket]):
     print("-" * len(header))
 
     for item in open_port_data:
-        protocol = item.protocol if item.protocol is not None else "UNKNOWN"
-        state = item.state if item.state is not None else "UNKNOWN"
+        protocol = printable(item.protocol) if item.protocol is not None else "UNKNOWN"
+        state = printable(item.state) if item.state is not None else "UNKNOWN"
         address = item.local_address if item.local_address is not None else "UNKNOWN"
         port = item.local_port if item.local_port is not None else "UNKNOWN"
 
@@ -346,7 +366,7 @@ def display_known_services(services: list[ServiceInfo]):
     print("-" * len(header))
 
     for item in services:
-        protocol = item.protocol if item.protocol is not None else "UNKNOWN"
+        protocol = printable(item.protocol) if item.protocol is not None else "UNKNOWN"
         address = item.local_address if item.local_address is not None else "UNKNOWN"
         port = item.port if item.port is not None else "UNKNOWN"
         service = item.service_name if item.service_name is not None else "UNKNOWN"
@@ -374,7 +394,7 @@ def display_routing_table(
     print("-" * len(title))
     print()
 
-    print("Hostname :", hostname or "Unavailable")
+    print("Hostname :", printable(hostname) if hostname else "Unavailable")
     print("Interface:", interface or "Unavailable")
     print("IP       :", ip_address or "Unavailable")
     print("Gateway  :", gateway or "Unavailable")
@@ -385,7 +405,7 @@ def display_routing_table(
         print("No route information available.")
     else:
         for line in route_data:
-            print(line)
+            print(printable(line))
 
     print()
 
@@ -403,8 +423,12 @@ def display_network_interface_status(interface_data: list[NetworkInterface]):
         return
 
     for item in interface_data:
-        print(f"Device    : {item.device if item.device is not None else 'UNKNOWN'}")
-        print(f"Type      : {item.interface_type if item.interface_type is not None else 'UNKNOWN'}")
-        print(f"State     : {item.state if item.state is not None else 'UNKNOWN'}")
-        print(f"Connection: {item.connection or '--'}")
+        device = printable(item.device) if item.device is not None else "UNKNOWN"
+        interface_type = printable(item.interface_type) if item.interface_type is not None else "UNKNOWN"
+        state = printable(item.state) if item.state is not None else "UNKNOWN"
+        connection = printable(item.connection) if item.connection else "--"
+        print(f"Device    : {device}")
+        print(f"Type      : {interface_type}")
+        print(f"State     : {state}")
+        print(f"Connection: {connection}")
         print()

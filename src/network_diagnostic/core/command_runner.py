@@ -2,9 +2,9 @@ import os
 import subprocess
 import time
 
-from exceptions import CommandExecutionError, CommandNotFoundError, CommandTimeoutError
-from models import CommandResult
-from validation import validate_command_arguments, validate_timeout
+from network_diagnostic.core.exceptions import CommandExecutionError, CommandNotFoundError, CommandTimeoutError
+from network_diagnostic.core.models import CommandResult
+from network_diagnostic.core.validation import validate_command_arguments, validate_timeout
 
 
 def command_environment() -> dict[str, str]:
@@ -22,9 +22,13 @@ def run_command(
     arguments = list(arguments)
     started = time.monotonic()
     try:
+        # Output is decoded as UTF-8 regardless of the caller's locale. Invalid
+        # bytes become U+FFFD instead of raising UnicodeDecodeError, which is not
+        # a DiagnosticError. Parsers reject the replacement character in
+        # validated fields.
         result = subprocess.run(
-            arguments, capture_output=True, text=True, timeout=timeout,
-            env=command_environment(), shell=False, check=False,
+            arguments, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=command_environment(), shell=False, check=False,
         )
     except FileNotFoundError as error:
         raise CommandNotFoundError(

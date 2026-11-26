@@ -10,6 +10,54 @@ P3 = virheellisen tai poikkeavan syötteen validointipuute. Ei havaittuja P0/P1-
 Avoimia numeroituja ongelmia ei tällä hetkellä ole. Jäljellä olevat rajaukset on kuvattu
 tiedoston lopussa.
 
+## Korjattu (vaihe 13): Virheellinen tavu komentotulosteessa kaatoi ohjelman (P2)
+
+`run_command()` dekoodasi tulosteen tiukasti localen merkistöllä. Yksi virheellinen
+UTF-8-tavu (esim. `/etc/hosts`-alias tai yhteysnimi) nosti `UnicodeDecodeError`-poikkeuksen,
+jota mikään `DiagnosticError`-käsittelijä ei ottanut kiinni. Tuloste dekoodataan nyt
+UTF-8:na ja virheelliset tavut korvataan merkillä U+FFFD. Testi:
+`test_run_command_replaces_undecodable_output_instead_of_raising`.
+
+## Korjattu (vaihe 13): Oletusreitin valinta `dead`- ja multipath-reiteillä (P2, entinen rajaus)
+
+- `dead`-lipulla merkitty reitti ohitetaan, koska ydin ei käytä sitä. Testit:
+  `test_select_default_route_skips_dead_route_with_lower_metric`,
+  `test_select_default_route_returns_none_when_only_dead_default_routes_exist`.
+- Valittu oletusreitti ilman `dev`-kenttää (multipath `nexthop`, nexthop-ryhmä `nhid`)
+  tuottaa `ParsingError`-virheen. Aiemmin tilannekuva näytti liitännän, osoitteen ja
+  gatewayn puuttuvina ilman virhettä, ja gateway-ping väitti, ettei reitillä ole gatewayta.
+  Testit: `test_route_parsers_reject_default_route_without_single_next_hop`,
+  `test_ping_gateway_reports_multipath_route_as_unsupported_instead_of_missing_gateway`,
+  `test_get_routing_snapshot_records_multipath_default_route_as_error`.
+  Epärealistiset testisyötteet `["default"]` ja `["default via 192.0.2.1"]` siirrettiin
+  odottamaan virhettä `None`-tuloksen sijaan.
+
+## Korjattu (vaihe 13): nmcli-parserit ohittivat tunnistamattomat rivit (P2, entinen rajaus)
+
+`parse_nmcli_output()` ja `parse_nmcli_states()` nostavat nyt
+`ParsingError("Unrecognized line in nmcli output")` ei-tyhjälle riville, jossa on väärä
+kenttämäärä tai puuttuva laite tai tila. Aiemmin tuntematon tuloste raportoitiin tilana
+"No connected interface detected". Testit:
+`test_parse_nmcli_output_rejects_unrecognized_line_instead_of_partial_list`,
+`test_parse_nmcli_states_rejects_unrecognized_line`,
+`test_get_connection_status_reports_unrecognized_nmcli_output_as_error`,
+`test_get_network_plugin_reports_unrecognized_output_instead_of_guessing`.
+Ohitusta kuvanneet testit muutettiin testaamaan tyhjien rivien ohitusta ja tyhjien
+TYPE/CONNECTION-kenttien hyväksymistä.
+
+## Korjattu (vaihe 13): Päätteen ohjausmerkit CLI-tulosteessa (P3)
+
+CLI näyttää komennoista ja järjestelmästä tulevan tekstin tulostumattomat merkit
+(tabia lukuun ottamatta) escape-muodossa (`\x1b`). Testi:
+`test_outputs_show_terminal_control_characters_as_escapes`.
+
+## Korjattu (vaihe 13): Liian vahvat CLI-ilmoitukset (P3)
+
+- Päävalikon tila on nyt "NetworkManager reports no connected interface" (aiemmin
+  "No connected interface detected"): arvo kuvaa vain NetworkManagerin näkemystä.
+- DNS-viivetesti kertoo, että viive mitattiin määritettyyn DNS-palvelimeen, joka voi
+  olla paikallinen välimuisti.
+
 ## Korjattu (vaihe 10): Verkkotiedot saattoivat tulla eri oletusreiteiltä (entinen kohta 1)
 
 `parsers.select_default_route()` valitsee yhden oletusreitin ytimen tapaan: pienimmän
@@ -156,17 +204,43 @@ Vaiheen 11 rajaukset (Service Layer):
   saman nimen onnistunut IPv4-tulos katoaa. Service Layer säilyttää muiden nimien tulokset.
 - `RoutingSnapshot.errors` tallentaa virheen tekstinä, joten poikkeuksen tyyppi (esim.
   aikakatkaisu) näkyy vain viestissä.
-- Python 3.9 -yhteensopivuus on tarkistettu vain syntaksin osalta. Testejä ei ole ajettu
-  Python 3.9 -tulkilla.
+- Python-versiot (vaihe 13.1): vähimmäisversio 3.11 (`requires-python = ">=3.11"`),
+  ensisijainen kehitysversio ja Docker-ympäristö 3.12. Paikallisesti testit on ajettu vain
+  Python 3.12:lla. Vaiheen 13.2 CI-putki ajaa testit versioilla 3.11–3.14; yhteensopivuus on
+  todennettu vasta, kun nämä GitHub Actions -ajot ovat onnistuneet. Docker-ympäristön
+  versiotestaus on edelleen erillinen tehtävä.
+
+Vaiheen 13.2 rajaukset (CI):
+
+- CI ajaa vain mockatut testit Ubuntu 24.04:llä. Todellista verkkoa, muita jakeluita, Dockeria
+  tai päätteen esitystä ei testata.
+- pip-audit tunnistaa vain julkisissa haavoittuvuustietokannoissa (PyPI/OSV) olevat
+  haavoittuvuudet. Linux-järjestelmätyökaluja (`ping`, `ip`, `dig` ym.) ei auditoida.
+- pip-auditin ja CI:n pip-version kiinnitykset (`PIP_AUDIT_VERSION`, `PIP_VERSION`) päivitetään
+  käsin; Dependabot ei kata niitä.
+- Branch protection ja vaadittu status check (`CI Quality Gate`) on otettava käyttöön
+  GitHubin asetuksista käsin ensimmäisen onnistuneen ajon jälkeen.
+
+Vaiheen 12 rajaukset (paketointi):
+
+- Dockerfile ei asenna pakettia. Käyttäjän kehityskontissa testit läpäisevät, kun paketti
+  asennetaan erikseen (metatiedot) ja `PYTHONPATH=/app/src`. Tämä ei ole puhdas
+  wheel-asennuksen testi. Dockerfilen päivitys kuuluu erilliseen Docker-tehtävään.
+- Paketin rakentaminen lataa setuptoolsin PyPI:stä, jos sitä ei ole saatavilla.
 
 Vaiheen 10 rajaukset:
 
-- Multipath-oletusreitin (`nexthop`) seuraavan hypyn arvoja ei jäsennetä, joten liitäntä ja
-  gateway ovat tällöin `None`. `linkdown`- ja `dead`-lippuja ei huomioida, eikä
-  policy routingia arvioida.
+- Multipath-oletusreitti raportoidaan virheenä (vaihe 13); yksittäistä seuraavaa hyppyä ei
+  valita. Laajempi multipath-tuki on suunniteltu vaiheeseen 37 (Advanced Diagnostic
+  Collection). Policy routingia (`ip rule`) ei arvioida, koska `ip -4 route` näyttää vain
+  main-taulun; suunniteltu vaiheeseen 37. `linkdown`-reitit ovat ehdokkaita, kuten ytimen oletusasetuksella
+  (`ignore_routes_with_linkdown=0`); jos asetus on käytössä, valinta voi poiketa ytimestä.
+  Täsmällinen ratkaisu olisi `ip -4 route get <kohde>` (uusi ominaisuus).
 - Palvelunimi on edelleen porttiin perustuva ehdotus. Kuuntelevan osoitteen altistusta
-  (loopback vai kaikki liitännät) ei luokitella.
-- `parse_nmcli_output()` ja `parse_nmcli_states()` ohittavat edelleen virheelliset rivit.
+  (loopback vai kaikki liitännät) ei luokitella (vaatisi uuden tietomallikentän).
+  Luokittelu on suunniteltu vaiheeseen 16 (Rule-based Root Cause Analysis). Wildcard-osoitteeseen
+  (`0.0.0.0`, `::`, `*`) sidottu socket ei yksin todista ulkoista saavutettavuutta tai
+  tietoturvahaavoittuvuutta: palomuuri, reititys ja palvelun oma pääsynhallinta ratkaisevat sen.
 - Kun yhtään vastausta ei ole saatu, ping odottaa viimeisen paketin jälkeen enintään
   `PING_REPLY_WAIT` (2 s). Tätä hitaammat vastaukset lasketaan hävityiksi.
 
@@ -179,3 +253,39 @@ Vaiheen 9 rajaukset:
   (`min/avg/max`) tulkitaan virheeksi kuten ennenkin.
 - getent `ahosts`-tulosteen virheelliset rivit ohitetaan.
 - Jos jäsennys epäonnistuu, tuloksessa ei ole osittaisia mittausarvoja.
+
+Vaiheen 13 rajaukset:
+
+- `getent hosts` palauttaa koodin 2 sekä olemattomalle nimelle että tavoittamattomalle
+  resolverille. `DnsQueryResult.resolved=False` tarkoittaa "ei selvitetty", ei NXDOMAINia.
+  Sama koskee `ipv_check()`-tulosten tyhjiä osoitelistoja. getent-haun epäonnistuminen ei
+  yksin todista DNS-palvelimen toimintahäiriötä (syy voi olla myös olematon nimi,
+  `/etc/nsswitch.conf`, paikallinen resolveri tai verkkoyhteys). Tulkinnan tarkentaminen on
+  suunniteltu vaiheeseen 16.
+- DNS-viivetulos ei kerro vastanneen palvelimen osoitetta (dig `;; SERVER:`); kentän
+  lisääminen on julkisen tietomallin muutos.
+- `output.clear_screen()` käyttää `os.system("clear")`. Komento on vakio eikä sisällä
+  syötettä; muutosta ei tehty.
+- Command Runner lukee koko tulosteen muistiin. Käytettyjen komentojen tulosteet ovat pieniä,
+  joten kokorajoitusta ei toteutettu.
+- Palvelufunktioita ei voi keskeyttää kesken komennon. Pahin kesto nykyisillä
+  aikakatkaisuilla: `lookup_ip_addresses()` 80 s (oletusnimet), `get_routing_snapshot()`
+  30 s, gateway-ping 20 s, muut 10 s. Keskeytys on suunniteltu vaiheeseen 24
+  (Workers & Application State).
+- `cli/main.py`:n neljä kattamatonta haaraa (90->72, 112->95, 115->35, 138->116) ovat
+  saavuttamattomia: `read_menu_choice(n)` palauttaa vain arvot 1..n, ja jokainen käsitellään.
+- Todellisen Linux-ympäristön hyväksyntätestaus puuttuu edelleen; ohje:
+  `docs/testing/manual-acceptance-tests.md` (paikallinen, ei versionhallinnassa).
+
+Suunnitellut käsittelyvaiheet (roadmap `docs/plans/project-roadmap.md`, paikallinen):
+
+| Avoin rajoite | Vaihe |
+|---|---|
+| Policy routing | 37 |
+| Multipath-reitityksen laajempi tuki | 37 |
+| getent-tulosten tulkinnan epävarmuus | 16 |
+| Socket-osoitteiden luokittelu | 16 |
+| Palvelukutsujen keskeyttäminen | 24 |
+| Python 3.11-, 3.13- ja 3.14-yhteensopivuustestaus | CI (vaihe 13.2); Docker-testaus erikseen |
+
+Nykyistä diagnostiikkalogiikkaa ei ole muutettu näiden tulevien tehtävien vuoksi.

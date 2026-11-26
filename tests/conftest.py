@@ -2,8 +2,8 @@ from unittest.mock import Mock
 
 import pytest
 
-import command_runner
-import output
+from network_diagnostic.core import command_runner
+from network_diagnostic.cli import output
 
 
 @pytest.fixture(autouse=True)

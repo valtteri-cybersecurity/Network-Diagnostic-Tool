@@ -1,8 +1,8 @@
-from command_runner import run_command
-from exceptions import ParsingError
-from models import CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus
-from parsers import parse_dig_output, parse_getent_addresses, parse_getent_hosts
-from validation import validate_host
+from network_diagnostic.core.command_runner import run_command
+from network_diagnostic.core.exceptions import ParsingError
+from network_diagnostic.core.models import CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus
+from network_diagnostic.core.parsers import parse_dig_output, parse_getent_addresses, parse_getent_hosts
+from network_diagnostic.core.validation import validate_host
 
 
 DIG_NO_REPLY = 9

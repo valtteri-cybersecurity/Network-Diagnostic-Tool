@@ -4,9 +4,9 @@ from unittest.mock import Mock, call
 
 import pytest
 
-import dns
-from exceptions import CommandError, ValidationError
-from models import (
+from network_diagnostic.core import dns
+from network_diagnostic.core.exceptions import CommandError, ValidationError
+from network_diagnostic.core.models import (
     CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
 )
 

@@ -5,9 +5,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from exceptions import CommandError, CommandExecutionError, DiagnosticError, ValidationError
-from models import CommandResult, ExecutionStatus, PacketLossStatus, PingResult
-import ping
+from network_diagnostic.core.exceptions import CommandError, CommandExecutionError, DiagnosticError, ValidationError
+from network_diagnostic.core.models import CommandResult, ExecutionStatus, PacketLossStatus, PingResult
+from network_diagnostic.core import ping
 
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "ping"
@@ -27,7 +27,7 @@ def test_run_ping_uses_expected_arguments_and_c_locale(monkeypatch, subprocess_r
     assert result.return_code == 0
     subprocess_run.assert_called_once_with(
         ["ping", "-n", "-c", "3", "-W", "2", "example.com"],
-        capture_output=True, text=True, timeout=10, check=False, shell=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=False, shell=False,
         env={**original_environment, "LC_ALL": "C"},
     )
     assert dict(os.environ) == original_environment
@@ -617,3 +617,19 @@ def test_run_ping_diagnostic_keeps_icmp_errors_of_unreachable_target(subprocess_
     assert result.execution_status is ExecutionStatus.COMPLETED
     assert result.packet_loss_status is PacketLossStatus.TOTAL_LOSS
     assert result.icmp_errors == 3
+
+
+def test_ping_gateway_reports_multipath_route_as_unsupported_instead_of_missing_gateway(monkeypatch, subprocess_run):
+    # Phase 13 regression: a multipath default route was reported as
+    # "The IPv4 default route has no gateway address".
+    routes = ["default proto static metric 100", "\tnexthop via 192.0.2.1 dev enp3s0 weight 1"]
+    monkeypatch.setattr(ping, "get_ip_route", Mock(return_value=routes))
+
+    result = ping.ping_target("gateway")
+
+    assert result.execution_status is ExecutionStatus.FAILED
+    assert result.error == (
+        "Unsupported default route: no single output interface (for example, a multipath route)"
+    )
+    assert result.reachable is None
+    subprocess_run.assert_not_called()

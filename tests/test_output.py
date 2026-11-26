@@ -4,8 +4,8 @@ from unittest.mock import Mock
 
 import pytest
 
-import output
-from models import (
+from network_diagnostic.cli import output
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     LatencyAnalysis, ListeningSocket, NetworkInterface, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
 )
@@ -44,7 +44,7 @@ def test_display_menu_handles_empty_options(capsys):
 
 @pytest.mark.parametrize("connected, expected_status", [
     (True, "Connected interface detected"),
-    (False, "No connected interface detected"),
+    (False, "NetworkManager reports no connected interface"),
     (None, "NetworkManager status unavailable"),
 ])
 def test_mainmenu1_displays_fixed_date_connection_state_and_options(
@@ -259,6 +259,8 @@ def test_dns_latency_output_displays_measurement_and_classification(analysis, de
     assert "Measurement completed" in text
     assert "12.35 ms" in text
     assert f"Analysis  : {description}" in text
+    # Phase 13: a local caching resolver may answer, so the result is not upstream latency.
+    assert "Note      : Measured to the configured DNS server, which may be a local cache" in text
 
 
 def test_dns_latency_output_does_not_treat_fast_nxdomain_as_resolved(capsys):
@@ -592,3 +594,43 @@ def test_display_ping_report_explains_total_loss_with_icmp_errors(capsys):
     )
     assert "did not respond" not in text
     assert f"{'icmp errors':<20}: 3" in text
+
+
+# Phase 13 regression: text from commands and the system (connection names,
+# route lines, hostnames, ss fields, command error output) was printed as is,
+# so terminal control sequences in it were executed by the terminal.
+ESCAPE = "\x1b[2J\x1b]0;title\x07"
+SHOWN_ESCAPE = "\\x1b[2J\\x1b]0;title\\x07"
+
+
+@pytest.mark.parametrize("function, arguments", [
+    (output.display_command_error, ("nmcli failed: " + ESCAPE,)),
+    (output.display_network_interface_status,
+     ([NetworkInterface("enp3s0", "ethernet", "connected", "Cafe" + ESCAPE)],)),
+    (output.display_network_interface_status,
+     ([NetworkInterface("enp3s0" + ESCAPE, "wifi" + ESCAPE, "connected" + ESCAPE, "")],)),
+    (output.display_routing_table,
+     ("host" + ESCAPE, "enp3s0", "192.0.2.10", "192.0.2.1", ["default via 192.0.2.1 dev enp3s0" + ESCAPE])),
+    (output.display_ping_report,
+     (PingResult(target="localhost", raw_output="PING\n" + ESCAPE + "\nend", error="ping failed" + ESCAPE),)),
+    (output.dns_query_output, (DnsQueryResult(hostname="example.com", error="getent" + ESCAPE),)),
+    (output.dns_latency_output, (DnsLatencyResult(hostname="example.com", error="dig" + ESCAPE),)),
+    (output.ipv_check_output, (DnsAddressResult(hostname="example.com", error="getent" + ESCAPE),)),
+    (output.display_open_ports,
+     ([ListeningSocket("tcp" + ESCAPE, "LISTEN" + ESCAPE, "127.0.0.1", "22", "0.0.0.0", "*")],)),
+    (output.display_known_services, ([ServiceInfo("tcp" + ESCAPE, "127.0.0.1", 22, "SSH")],)),
+])
+def test_outputs_show_terminal_control_characters_as_escapes(function, arguments, capsys):
+    function(*arguments)
+
+    text = capsys.readouterr().out
+    assert "\x1b" not in text
+    assert "\x07" not in text
+    assert SHOWN_ESCAPE in text
+
+
+def test_display_ping_report_keeps_raw_output_lines_and_printable_unicode(capsys):
+    output.display_ping_report(PingResult(target="localhost", raw_output="PING ä\n\tline 2"))
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == ["PING ä", "\tline 2"]

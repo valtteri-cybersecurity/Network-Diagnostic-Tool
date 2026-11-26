@@ -2,8 +2,8 @@ from dataclasses import replace
 
 import pytest
 
-import analysis
-from models import (
+from network_diagnostic.core import analysis
+from network_diagnostic.core.models import (
     DnsLatencyResult, LatencyAnalysis, ListeningSocket, PacketLossStatus,
     PingResult, ServiceInfo, SocketCounts,
 )

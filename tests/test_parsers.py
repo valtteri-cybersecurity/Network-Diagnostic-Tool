@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-import parsers
-from exceptions import ParsingError
-from models import (
+from network_diagnostic.core import parsers
+from network_diagnostic.core.exceptions import ParsingError
+from network_diagnostic.core.models import (
     DnsLatencyResult, ExecutionStatus, ListeningSocket, NetworkInterface, PingResult,
 )
 
@@ -413,7 +413,7 @@ def test_route_parsers_read_fixture():
 
 
 @pytest.mark.parametrize("routes", [[], [""], ["invalid"], ["192.0.2.0/24 dev enp3s0 src 192.0.2.10"],
-                                    ["default"], ["default via"], ["default dev"], ["default src"]])
+                                    ["default via"], ["default dev"], ["default src"]])
 def test_route_parsers_return_none_for_missing_values(routes):
     assert parsers.parse_default_gateway(routes) is None
     assert parsers.parse_default_interface(routes) is None
@@ -467,21 +467,20 @@ def test_parse_interface_ipv4_address_rejects_invalid_address():
     ("lo:connected\nenp4s0:disconnected\nwlp2s0:connected\n",
      [("lo", "connected"), ("enp4s0", "disconnected"), ("wlp2s0", "connected")]),
     ("enp3s0:connected (externally)\n", [("enp3s0", "connected (externally)")]),
-    ("\ninvalid\n:connected\nenp3s0:\nenp3s0:connected:extra\nwl\\:an:connected\n",
-     [("wl:an", "connected")]),
+    ("\n \nwl\\:an:connected\n", [("wl:an", "connected")]),
     ("", []),
 ])
 def test_parse_nmcli_states_reads_device_state_pairs(output, expected):
     assert parsers.parse_nmcli_states(output) == expected
 
 
-def test_parse_nmcli_output_skips_lines_without_device_or_state():
-    lines = [":ethernet:connected:Wired", "enp3s0:ethernet::Wired", "enp4s0:ethernet:disconnected:"]
+def test_parse_nmcli_output_accepts_empty_type_and_connection():
+    lines = ["enp4s0::disconnected:"]
 
     result = parsers.parse_nmcli_output(lines)
 
     assert result == [
-        NetworkInterface(device="enp4s0", interface_type="ethernet", state="disconnected", connection=""),
+        NetworkInterface(device="enp4s0", interface_type="", state="disconnected", connection=""),
     ]
 
 
@@ -535,9 +534,8 @@ def test_parse_nmcli_output_reads_devices_and_escaped_connections():
     ]
 
 
-def test_parse_nmcli_output_skips_malformed_lines_and_keeps_valid_ones():
-    lines = ["", "invalid", "enp3s0:ethernet:connected",
-             "enp3s0:ethernet:connected:extra:field", "lo:loopback:unmanaged:"]
+def test_parse_nmcli_output_skips_empty_lines_and_keeps_valid_ones():
+    lines = ["", "  ", "lo:loopback:unmanaged:", ""]
 
     result = parsers.parse_nmcli_output(lines)
 
@@ -812,3 +810,74 @@ def test_parse_ss_output_rejects_unrecognized_lines_instead_of_hiding_them(line)
 
     with parsing_error("Unrecognized line in ss output"):
         parsers.parse_ss_output([valid, line])
+
+
+# --- Phase 13 regressions: default route selection --------------------------
+
+
+def test_select_default_route_skips_dead_route_with_lower_metric():
+    # The kernel never uses a next hop marked dead, whatever its metric.
+    routes = [
+        "default via 198.51.100.1 dev wlan0 proto static metric 50 dead linkdown",
+        "default via 192.0.2.1 dev enp3s0 proto dhcp metric 100",
+    ]
+
+    route = parsers.select_default_route(routes)
+
+    assert route[route.index("dev") + 1] == "enp3s0"
+    assert parsers.parse_default_gateway(routes) == "192.0.2.1"
+
+
+def test_select_default_route_returns_none_when_only_dead_default_routes_exist():
+    assert parsers.select_default_route(["default via 192.0.2.1 dev enp3s0 metric 100 dead"]) is None
+
+
+@pytest.mark.parametrize("routes", [
+    # `ip -4 route` prints the next hops of a multipath route on indented lines.
+    ["default proto static metric 100",
+     "\tnexthop via 192.0.2.1 dev enp3s0 weight 1",
+     "\tnexthop via 198.51.100.1 dev wlan0 weight 1"],
+    # A route that uses a nexthop group object.
+    ["default nhid 100 proto static metric 100"],
+    # Lines without an interface. iproute2 always prints `dev` for a single-path
+    # unicast route; these inputs previously returned the gateway or None.
+    ["default"], ["default via 192.0.2.1"],
+])
+def test_route_parsers_reject_default_route_without_single_next_hop(routes):
+    message = "Unsupported default route: no single output interface (for example, a multipath route)"
+    for parser in (parsers.select_default_route, parsers.parse_default_gateway,
+                   parsers.parse_default_interface, parsers.parse_default_source):
+        with parsing_error(message):
+            parser(routes)
+
+
+def test_select_default_route_ignores_multipath_route_with_higher_metric():
+    routes = [
+        "default via 192.0.2.1 dev enp3s0 metric 100",
+        "default proto static metric 200",
+        "\tnexthop via 198.51.100.1 dev wlan0 weight 1",
+    ]
+
+    assert parsers.parse_default_interface(routes) == "enp3s0"
+
+
+# --- Phase 13 regressions: nmcli parsers reject unrecognized lines ----------
+
+
+@pytest.mark.parametrize("line", [
+    "invalid", "enp3s0:ethernet:connected", "enp3s0:ethernet:connected:extra:field",
+    ":ethernet:connected:Wired", "enp3s0:ethernet::Wired",
+])
+def test_parse_nmcli_output_rejects_unrecognized_line_instead_of_partial_list(line):
+    lines = ["lo:loopback:unmanaged:", line]
+
+    with parsing_error("Unrecognized line in nmcli output"):
+        parsers.parse_nmcli_output(lines)
+
+
+@pytest.mark.parametrize("output", [
+    "invalid\nwlp2s0:connected\n", "wlp2s0:connected:extra\n", ":connected\n", "enp3s0:\n",
+])
+def test_parse_nmcli_states_rejects_unrecognized_line(output):
+    with parsing_error("Unrecognized line in nmcli output"):
+        parsers.parse_nmcli_states(output)

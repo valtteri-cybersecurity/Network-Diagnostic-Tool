@@ -4,9 +4,9 @@ from unittest.mock import Mock
 
 import pytest
 
-import network
-from exceptions import CommandError, ParsingError
-from models import CommandResult
+from network_diagnostic.core import network
+from network_diagnostic.core.exceptions import CommandError, ParsingError
+from network_diagnostic.core.models import CommandResult
 
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "network"
@@ -76,11 +76,9 @@ def test_get_network_plugin_detects_connected_non_loopback_interface(monkeypatch
     (" \n", False),
     ("lo:connected\n", False),
     ("wlp2s0:disconnected\nenp3s0:unavailable\n", False),
-    ("invalid\nwlp2s0:connected:extra\n", False),
     ("enp3s0:connecting (getting IP configuration)\n", False),
     ("lo:connected (externally)\n", False),
     (r"veth\:1:connected" + "\n", True),
-    ("invalid\nwlp2s0:connected\n", True),
 ])
 def test_get_network_plugin_handles_interface_states(output, expected, monkeypatch):
     monkeypatch.setattr(network, "run_command", Mock(
@@ -160,7 +158,7 @@ def test_get_ip_skips_malformed_address_line_before_valid_address(monkeypatch):
 @pytest.mark.parametrize("routes", [
     [], [""], ["invalid output"],
     ["192.0.2.0/24 dev enp3s0 src 192.0.2.10"],
-    ["default via 192.0.2.1"], ["default dev"],
+    ["default dev"],
 ])
 def test_get_ip_without_default_interface_returns_none(routes, monkeypatch):
     command = Mock(side_effect=AssertionError("No address command expected"))
@@ -226,7 +224,6 @@ def test_get_gateway_uses_supplied_routes_without_querying(routes, expected, mon
     ([""], None),
     (["invalid"], None),
     (["192.0.2.0/24 dev enp3s0"], None),
-    (["default via 192.0.2.1"], None),
     (["default dev"], None),
 ])
 def test_get_nic_reads_first_available_default_route_interface(routes, expected):
@@ -347,3 +344,12 @@ def test_get_network_plugin_accepts_externally_connected_interface(output, expec
     result = network.get_network_plugin()
 
     assert result is expected
+
+
+@pytest.mark.parametrize("output", ["invalid\nwlp2s0:connected\n", "wlp2s0:connected:extra\n"])
+def test_get_network_plugin_reports_unrecognized_output_instead_of_guessing(output, monkeypatch):
+    # Phase 13: previously the first case returned True and the second False.
+    monkeypatch.setattr(network, "run_command", Mock(return_value=CommandResult([], output, "", 0, 0.0)))
+
+    with pytest.raises(ParsingError, match="^Unrecognized line in nmcli output$"):
+        network.get_network_plugin()

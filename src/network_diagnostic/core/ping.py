@@ -1,10 +1,10 @@
-from command_runner import run_command
-from exceptions import CommandError, CommandTimeoutError, DiagnosticError, ParsingError
-from models import CommandResult, ExecutionStatus, PingResult
-from network import get_gateway, get_ip_route
-from analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
-from parsers import parse_ping_statistics, select_default_route
-from validation import validate_host, validate_ipv4_address
+from network_diagnostic.core.command_runner import run_command
+from network_diagnostic.core.exceptions import CommandError, CommandTimeoutError, DiagnosticError, ParsingError
+from network_diagnostic.core.models import CommandResult, ExecutionStatus, PingResult
+from network_diagnostic.core.network import get_gateway, get_ip_route
+from network_diagnostic.core.analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
+from network_diagnostic.core.parsers import parse_ping_statistics, select_default_route
+from network_diagnostic.core.validation import validate_host, validate_ipv4_address
 
 
 PING_TIMEOUT = 10

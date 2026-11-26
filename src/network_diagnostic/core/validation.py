@@ -7,7 +7,7 @@ for a rejected value. Values are never converted or corrected silently.
 import ipaddress
 import re
 
-from exceptions import ValidationError
+from network_diagnostic.core.exceptions import ValidationError
 
 
 MAX_HOSTNAME_LENGTH = 253

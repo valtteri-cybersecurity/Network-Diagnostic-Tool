@@ -1,5 +1,7 @@
 # Network Diagnostic Tool
 
+[![CI](https://github.com/valtteri-cybersecurity/Network-Diagnostic-Tool/actions/workflows/ci.yml/badge.svg)](https://github.com/valtteri-cybersecurity/Network-Diagnostic-Tool/actions/workflows/ci.yml)
+
 A Python command-line tool for basic network troubleshooting on Linux. It combines ping tests, hostname resolution, DNS response-time measurements, local socket inspection, and network snapshots in one menu.
 
 ## Features
@@ -17,13 +19,28 @@ A Python command-line tool for basic network troubleshooting on Linux. It combin
 
 ## Requirements
 
-- Linux with Python 3.9 or newer. (Only Python 3.9 syntax compatibility has been checked; the test suite has not yet been run on a Python 3.9 interpreter.)
+- Linux with Python 3.11 or newer. Python 3.12 is the primary development version and the
+  only version on which the test suite has been run locally (including the Docker development
+  environment). The [CI pipeline](#continuous-integration) runs the tests on Python 3.11,
+  3.12, 3.13, and 3.14.
 - NetworkManager for interface status reporting.
-- The following commands: ping, ip, ss, nmcli, getent, dig, hostname, and clear.
 
-The project uses only the Python standard library. No third-party Python packages or pip installation are required.
+The package uses only the Python standard library and has no runtime Python dependencies.
+The diagnostics run the following Linux system tools, which are not Python packages and
+are not installed by pip:
 
-On Ubuntu or Debian, install the command dependencies with:
+| Command | Package (Ubuntu/Debian) | Used for |
+| --- | --- | --- |
+| `ping` | iputils-ping | Ping diagnostics |
+| `ip` | iproute2 | Routing table, interface, address, gateway |
+| `ss` | iproute2 | Listening sockets |
+| `nmcli` | network-manager | Connection status, interface states |
+| `getent` | libc-bin | Hostname and address lookups |
+| `dig` | dnsutils (bind9-dnsutils) | DNS response time |
+| `hostname` | hostname | System snapshot |
+| `clear` | ncurses-bin | Clearing the terminal (CLI only) |
+
+On Ubuntu or Debian, install them from the distribution repositories with:
 
 ```bash
 sudo apt update
@@ -32,13 +49,38 @@ sudo apt install python3 iputils-ping iproute2 network-manager dnsutils libc-bin
 
 Run the application as a normal user. The application itself does not require sudo.
 
-## Usage
+## Installation
 
-Open the project directory and run:
+Install the package into a virtual environment, never into the system Python
+environment and never with `sudo pip`. From the project directory:
 
 ```bash
-python3 main.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
 ```
+
+Building the package downloads the build backend (setuptools) from PyPI unless it
+is already available. The package is not published to PyPI.
+
+## Usage
+
+Start the command-line interface with the installed command:
+
+```bash
+network-diagnostic
+```
+
+or with the module form, which uses the same entry point:
+
+```bash
+python -m network_diagnostic
+```
+
+Both call `network_diagnostic.cli.main.run()`. The command is available only while
+the virtual environment that contains the package is active (or by its full path,
+e.g. `.venv/bin/network-diagnostic`). The former `python3 main.py` start-up has been
+replaced by these commands; there is no `main.py` in the project root anymore.
 
 Choose a numbered action from the menu:
 
@@ -50,36 +92,54 @@ Choose a numbered action from the menu:
 
 Each submenu includes a return option. Invalid selections prompt for another input. Press Ctrl+C to close the application.
 
-The current version uses predefined targets. To change them, edit the target definitions in diagnostic_service.py (DNS hostnames) and ping.py (ping targets).
+The current version uses predefined targets. To change them, edit the target definitions in `src/network_diagnostic/diagnostic_service.py` (DNS hostnames) and `src/network_diagnostic/core/ping.py` (ping targets).
 
 ## Error handling
 
 Network and DNS commands have a 10-second execution limit. Ping also has a 10-second limit; it waits at most two seconds for a reply when none has arrived (`-W 2`), so complete packet loss is reported as a completed measurement instead of a timeout. DNS queries made with dig use a three-second query timeout and one attempt, within the overall execution limit. When no DNS server replies (dig exit code 9), the DNS latency test returns a `timeout` result (`failed` for other no-reply cases such as a refused connection) with the error `No reply from DNS server`.
 
-Missing commands, command failures, and timeouts are reported to the user. Network and DNS execution errors return to the main menu. The system snapshot and the IPv4 / IPv6 address test instead show the parts that succeeded together with the errors of the parts that failed (see [Service layer](#service-layer)). If NetworkManager status is unavailable, the main menu remains accessible.
+Missing commands, command failures, and timeouts are reported to the user. Command output is decoded as UTF-8; invalid bytes are replaced with U+FFFD instead of stopping the program. The CLI shows non-printable characters in system and command text (such as connection names, route lines, and command error output) as escapes, for example `\x1b`, so that terminal control sequences are not executed. Network and DNS execution errors return to the main menu. The system snapshot and the IPv4 / IPv6 address test instead show the parts that succeeded together with the errors of the parts that failed (see [Service layer](#service-layer)). If NetworkManager status is unavailable, the main menu remains accessible. The main menu status reflects only NetworkManager: "NetworkManager reports no connected interface" can also appear when another service, such as systemd-networkd, manages the connection.
 
 Inputs that are rejected before a command runs raise `ValidationError`. The CLI reports them like other expected errors and returns to the main menu; ping reports them as a failed `PingResult`.
 
-A hostname not found by getent is reported as an unsuccessful lookup. DNS response codes such as NXDOMAIN are displayed separately from response time: a fast response does not necessarily mean that the requested name exists.
+A hostname not found by getent is reported as an unsuccessful lookup. getent uses the same exit code when the name does not exist and when no resolver answered, so an unsuccessful lookup does not prove that the name does not exist. DNS response codes such as NXDOMAIN are displayed separately from response time: a fast response does not necessarily mean that the requested name exists.
 
 ## Project structure
 
-| File | Responsibility |
-| --- | --- |
-| main.py | Menu navigation, user choices, and error display |
-| diagnostic_service.py | UI-independent application interface that coordinates the engine |
-| command_runner.py | Safe command execution, timeouts, and execution timing |
-| exceptions.py | Shared diagnostic, validation, parsing, and command exceptions |
-| validation.py | Input validation before commands are executed |
-| parsers.py | Pure, validating parsers for ping, DNS, and network command output |
-| models.py | Typed command, diagnostic, socket, interface, and analysis data models |
-| network.py | Network data collection |
-| ping.py | UI-independent ping execution and analysis coordination |
-| dns.py | Hostname resolution, address lookups, and DNS measurements |
-| analysis.py | Socket filtering, service-name suggestions, and measurement classifications |
-| output.py | Menus, reports, error messages, and screen output |
+The project is an installable Python package with a `src` layout:
 
-The diagnostic engine consists of `ping`, `dns`, `network`, `analysis`, `parsers`,
+```
+pyproject.toml              Package metadata, build system, pytest and coverage settings
+requirements-dev.txt        Test dependencies
+src/network_diagnostic/
+    __init__.py             Package marker (no import-time side effects)
+    __main__.py             python -m network_diagnostic
+    diagnostic_service.py   Application interface (service layer)
+    core/                   Diagnostic engine
+    cli/                    Command-line interface
+tests/                      Tests and command-output fixtures
+```
+
+| Module (`network_diagnostic.`) | Responsibility |
+| --- | --- |
+| `cli.main` | Menu navigation, user choices, error display, and the `run()` entry point |
+| `cli.output` | Menus, reports, error messages, and screen output |
+| `diagnostic_service` | UI-independent application interface that coordinates the engine |
+| `core.command_runner` | Safe command execution, timeouts, and execution timing |
+| `core.exceptions` | Shared diagnostic, validation, parsing, and command exceptions |
+| `core.validation` | Input validation before commands are executed |
+| `core.parsers` | Pure, validating parsers for ping, DNS, and network command output |
+| `core.models` | Typed command, diagnostic, socket, interface, and analysis data models |
+| `core.network` | Network data collection |
+| `core.ping` | UI-independent ping execution and analysis coordination |
+| `core.dns` | Hostname resolution, address lookups, and DNS measurements |
+| `core.analysis` | Socket filtering, service-name suggestions, and measurement classifications |
+
+All imports are absolute package imports such as
+`from network_diagnostic.core.models import PingResult`. Module names below refer to
+these modules; `main.py` and `output.py` are in `cli/`, the engine modules in `core/`.
+
+The diagnostic engine (`network_diagnostic.core`) consists of `ping`, `dns`, `network`, `analysis`, `parsers`,
 `models`, `exceptions`, `validation`, and `command_runner`. It executes commands, parses their output,
 builds result models, and classifies measurements. It never prints, prompts,
 clears the screen, or imports `main` or `output`. Importing modules runs no commands.
@@ -104,10 +164,24 @@ can call the same service functions and render the same results without CLI impo
 
 ## Service layer
 
-`diagnostic_service.py` is the application interface for the CLI, a future GUI,
-and direct Python use. It consists of plain synchronous functions without state,
-so a GUI can call them from a worker thread. They never print or prompt and return
-dataclasses from `models.py`.
+`network_diagnostic.diagnostic_service` is the application interface for the CLI,
+a future GUI, and direct Python use. It consists of plain synchronous functions without
+state, so a GUI can call them from a worker thread. They never print or prompt and return
+dataclasses from `network_diagnostic.core.models`. Exceptions are defined in
+`network_diagnostic.core.exceptions`.
+
+```python
+from network_diagnostic.diagnostic_service import run_ping_diagnostic
+from network_diagnostic.core.models import ExecutionStatus
+
+result = run_ping_diagnostic("internet")
+if result.execution_status is ExecutionStatus.COMPLETED:
+    print(result.packet_loss_percent, result.avg_rtt_ms)
+else:
+    print(result.error)
+```
+
+Importing the package or the service layer runs no commands and does not load the CLI.
 
 | Function | Returns | Errors raised |
 | --- | --- | --- |
@@ -118,7 +192,7 @@ dataclasses from `models.py`.
 | `lookup_ip_addresses(hostnames=ADDRESS_LOOKUP_HOSTNAMES)` | `list[DnsAddressResult]` in input order | `ValidationError` (before any lookup) |
 | `get_listening_ports()` | `ListeningPortReport(sockets, counts, services)` from one `ss` run | `CommandError`, `ParsingError` |
 | `get_routing_snapshot()` | `RoutingSnapshot(hostname, interface, ip_address, gateway, routes, errors)` | none for command or parsing failures |
-| `get_network_interfaces()` | `list[NetworkInterface]` | `CommandError` |
+| `get_network_interfaces()` | `list[NetworkInterface]` | `CommandError`, `ParsingError` |
 
 Error contract:
 
@@ -134,8 +208,12 @@ Error contract:
   available. Failed parts stay `None` and their messages are stored in `errors`
   (keys `routes`, `hostname`, `interface`, `ip_address`, `gateway`). `routes=None`
   means the routing table is unavailable; `[]` means it has no routes.
-- `get_listening_ports()` is all-or-nothing: an unrecognized `ss` line raises
-  `ParsingError` so that an incomplete socket list is never shown as complete.
+- `get_listening_ports()`, `get_network_interfaces()`, and `get_connection_status()`
+  are all-or-nothing: an unrecognized `ss` or `nmcli` line raises `ParsingError` so
+  that an incomplete list is never shown as complete.
+- An unsupported default route (no single output interface, such as a multipath
+  route) is recorded as a `ParsingError` message in `RoutingSnapshot.errors` for
+  `interface`, `ip_address`, and `gateway`, and as a failed gateway `PingResult`.
 - Only `CommandError` and `ParsingError` are caught. Programming errors propagate.
 
 ## Command execution
@@ -144,7 +222,8 @@ Network, DNS, and ping diagnostics use the UI-independent `command_runner`.
 `run_command(arguments, allowed_codes=(0,), timeout=10)` accepts a non-empty list
 of string arguments, runs without a shell, and returns `CommandResult` with
 `arguments`, `stdout`, `stderr`, `return_code`, and `duration_seconds` measured
-with `time.monotonic()`. The environment is copied with `LC_ALL=C`; the timeout
+with `time.monotonic()`. The environment is copied with `LC_ALL=C`, and output is
+decoded as UTF-8 with invalid bytes replaced by U+FFFD; the timeout
 must be greater than 0 and at most 60 seconds. Invalid arguments (not a non-empty
 list of strings, an empty program name, or any NUL character) and invalid timeouts
 (non-numeric, boolean, zero, negative, NaN, infinite, or above 60 seconds)
@@ -253,8 +332,8 @@ text; it does not classify packet-loss values itself.
 Call the public function directly from Python without importing the CLI:
 
 ```python
-from ping import run_ping_diagnostic
-from models import ExecutionStatus
+from network_diagnostic.core.ping import run_ping_diagnostic
+from network_diagnostic.core.models import ExecutionStatus
 
 result = run_ping_diagnostic("localhost")
 if result.execution_status is ExecutionStatus.COMPLETED:
@@ -281,8 +360,11 @@ information is unavailable.
 
 Routing remains based on the current text output from `ip`; no route model is
 introduced. `parsers.select_default_route()` selects the single IPv4 default route
-the kernel prefers (lowest metric, missing metric = 0, first route on a tie). The
-interface, IPv4 address, and gateway are all read from that route. Gateway ping
+the kernel prefers (lowest metric, missing metric = 0, first route on a tie, routes
+marked `dead` skipped). The interface, IPv4 address, and gateway are all read from that
+route. A selected default route without `dev`, such as a multipath route with indented
+`nexthop` lines or a nexthop group (`nhid`), raises `ParsingError` because it has no
+single gateway or interface. Gateway ping
 reports separately when there is no IPv4 default route and when the default route
 has no gateway (for example, a point-to-point link).
 
@@ -312,8 +394,8 @@ A failed parse carries no partial measurement values; ping keeps the raw output.
 | `parse_getent_addresses(output, version)` | Returns unique addresses of one version; invalid and other-version lines are skipped. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, returned by `getent ahostsv6` for IPv4-only names) are not IPv6 addresses and are skipped. |
 | `parse_dig_output(output, hostname)` | Requires a response code (`[A-Z][A-Z0-9]*`); the answer count is an integer and the query time a non-negative decimal in `msec`. A present but invalid value or conflicting repeated values are errors; an absent value is `None`. The response code and the query time stay separate. |
 | `parse_ss_output(lines)` | Ports are `*` or 0-65535; addresses are `*`, IPv4, or IPv6, optionally with a `%interface` scope inside or after the brackets. Empty lines and a `Netid` header are skipped; any other line that does not match raises `ParsingError`, so a partial socket list is never shown as complete. |
-| `parse_nmcli_output(lines)`, `parse_nmcli_states(output)` | Lines with a wrong field count or an empty device or state are skipped. |
-| `select_default_route(route_lines)` | Returns the fields of the default route with the lowest metric (missing = 0; first on a tie), or `None`. Incomplete lines that end with `via`, `dev`, `src`, or `metric` are skipped. A metric must be an integer 0-4294967295. |
+| `parse_nmcli_output(lines)`, `parse_nmcli_states(output)` | Empty lines are skipped. A line with a wrong field count or an empty device or state raises `ParsingError("Unrecognized line in nmcli output")`. Empty type and connection fields are allowed. |
+| `select_default_route(route_lines)` | Returns the fields of the default route with the lowest metric (missing = 0; first on a tie), or `None`. Incomplete lines that end with `via`, `dev`, `src`, or `metric` and routes marked `dead` are skipped. A metric must be an integer 0-4294967295. A selected route without `dev` (multipath or nexthop group) raises `ParsingError`. |
 | `parse_default_gateway()`, `parse_default_source()`, `parse_default_interface()` | Read from the route chosen by `select_default_route()`. The `via` and `src` values must be IPv4 addresses and `dev` a valid interface name (phase 8 validators). |
 | `parse_interface_ipv4_address(output)` | The first `inet` address must be a valid IPv4 address. |
 | `parse_port(text)` | A decimal string in the range 0-65535. |
@@ -332,33 +414,91 @@ DNS server information is not part of the current functionality and is not parse
 - Latency classifications are simple project-defined thresholds, not universal quality standards.
 - getent uses the system name-resolution configuration, including sources such as /etc/hosts. Its results are not necessarily obtained through a DNS network query.
 - IPv4 and IPv6 lookups show addresses returned by the system resolver. They do not test connectivity over either address family, and results can depend on host configuration.
-- DNS latency measures one query to the configured resolver. Caching affects the result. The default dig lookup requests an A record.
+- DNS latency measures one query to the server in `/etc/resolv.conf`, often a local caching resolver such as systemd-resolved (127.0.0.53). A cached answer measures the local resolver, not the upstream DNS server. The CLI states this with the result. The default dig lookup requests an A record.
 - Socket counts count rows, not unique port numbers. One port may appear on several addresses.
 - Service names are port-based suggestions. They do not identify the actual application or prove external accessibility.
-- The routing overview uses the IPv4 default route with the lowest metric in the main routing table. Policy routing, multipath (`nexthop`) default routes, and `linkdown`/`dead` route flags are not evaluated.
+- The routing overview uses the IPv4 default route with the lowest metric in the main routing table. Policy routing rules (`ip rule`) are not evaluated. Routes marked `dead` are skipped. `linkdown` routes are kept, as the kernel uses them by default (`ignore_routes_with_linkdown=0`). Multipath default routes are reported as unsupported instead of choosing one next hop.
+- A listening address is shown as reported by `ss`; the tool does not classify whether it is reachable only locally (loopback) or from other hosts.
 - NetworkManager's `connected` and `connected (externally)` states do not prove internet access.
 
-## Testing
+## Development
 
-Create and activate a development environment, then install the test dependencies:
+Create and activate a virtual environment, install the test dependencies, and install
+the package in editable mode so that source changes take effect without reinstalling:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
+python -m pip install -e .
 ```
 
-Run all tests:
+The test dependencies (pytest, pytest-cov) are listed only in `requirements-dev.txt`.
+They are not package metadata, and the Dockerfile installs them from that file.
+pytest and coverage settings are in `pyproject.toml`.
+
+## Testing
+
+Tests import the installed package (`network_diagnostic`). The `src` layout keeps the
+project root free of importable modules, so the tests cannot accidentally use files from
+the working directory; install the package first (see [Development](#development)).
+
+Run all tests from the project root:
 
 ```bash
 python -m pytest -v
 ```
 
-Measure line and branch coverage for the whole application:
+Measure line and branch coverage for the whole package (the measured package and branch
+coverage are configured in `pyproject.toml`):
 
 ```bash
-python -m pytest --cov=analysis --cov=network --cov=ping --cov=dns --cov=main --cov=output --cov=command_runner --cov=exceptions --cov=models --cov=validation --cov=parsers --cov=diagnostic_service --cov-branch --cov-report=term-missing
+python -m pytest --cov --cov-report=term-missing
 ```
+
+## Building
+
+Build a wheel into `dist/` without installing anything:
+
+```bash
+python -m pip wheel . --no-deps -w dist
+```
+
+Install the built wheel into another virtual environment with
+`python -m pip install dist/network_diagnostic-0.1.0-py3-none-any.whl`. The wheel contains
+only the `network_diagnostic` package and the `network-diagnostic` command; it does not
+contain the tests or the Linux system tools.
+
+## Continuous integration
+
+GitHub Actions runs the workflow `.github/workflows/ci.yml` on every push, on pull requests
+to `main`, on manual start (`workflow_dispatch`), and weekly on Monday at 04:17 UTC.
+All jobs run on `ubuntu-24.04` with read-only repository access and no secrets.
+
+| Job | What it checks |
+| --- | --- |
+| Tests (Python 3.11–3.14) | Full test suite on each version (`fail-fast: false`), editable install from `requirements-dev.txt` |
+| Coverage (Python 3.12) | Line coverage ≥ 99 % and branch coverage ≥ 98 %, checked separately from the JSON report by `.github/scripts/check_coverage.py`; full suite again in reverse order |
+| Package build and install | Builds the wheel, checks its contents and metadata against `pyproject.toml` (`.github/scripts/check_package.py`), installs it into a clean virtual environment, smoke-tests both entry points, and runs the tests against the installed wheel |
+| Dependency audit | `pip-audit` (pinned in the workflow, CI only) checks the exact packages installed by the test jobs, including transitive dependencies and pip itself; fails on any known vulnerability or audit error |
+| CI Quality Gate | Succeeds only when all jobs above succeeded; use it as the required status check |
+
+Reports are kept as workflow artifacts for 14 days: JUnit test reports, installed
+dependency lists, coverage reports (JSON, XML, HTML), the wheel, and the JSON audit reports.
+Actions are pinned to full commit SHAs. Dependabot (`.github/dependabot.yml`) opens weekly
+update pull requests for `requirements-dev.txt` and the actions; they are merged manually.
+The pinned pip and pip-audit versions (`PIP_VERSION`, `PIP_AUDIT_VERSION` in the workflow)
+are not covered by Dependabot and are updated manually.
+
+Run the coverage and reverse-order checks locally:
+
+```bash
+python -m pytest --cov --cov-report=json:reports/coverage.json
+python .github/scripts/check_coverage.py reports/coverage.json --min-line 99 --min-branch 98
+PYTHONPATH=.github/scripts python -m pytest -p reverse_order
+```
+
+## Test design
 
 Tests are in `tests/`, with reusable command output in `tests/fixtures/`.
 System commands are mocked, so tests need no internet connection, real network
@@ -368,7 +508,10 @@ tests use finite input sequences, and date-dependent output uses a fixed clock.
 Architecture tests import a fresh engine with CLI modules unavailable and verify
 silent ping success, complete packet loss, technical failure, and timeout handling.
 They also check that `parsers.py` imports only models, exceptions, validation, and
-standard-library modules and runs without commands, input, or output. Parser tests in
+standard-library modules and runs without commands, input, or output, that the
+package has no circular imports, and that importing any package module runs no
+commands and produces no output. Architecture tests read the module sources from the
+installed package. Parser tests in
 `tests/test_parsers.py` call the parsers directly with realistic output, without
 subprocess mocks.
 Report tests check that rendering neither mutates data nor executes commands.
@@ -381,10 +524,25 @@ imports the service layer nor the CLI imports engine modules directly.
 ## Validation
 
 The automated tests cover parsing, analysis, input validation, command errors and
-timeouts, CLI navigation, and report contents. Some tests explicitly preserve known incorrect
-behavior to protect the current implementation during refactoring; see
-[known issues](tests/KNOWN_ISSUES.md). Passing tests do not mean those issues are fixed.
+timeouts, CLI navigation, and report contents. Remaining limitations are listed in
+[known issues](tests/KNOWN_ISSUES.md).
 
 Mocked commands do not establish compatibility with every Linux installation or
 verify real connectivity, DNS, or terminal rendering. Before relying on the tool,
 exercise each menu action on the target machine with the network connected and disconnected.
+CI also runs the tests in reverse order to detect order dependencies (see
+[Continuous integration](#continuous-integration)).
+
+## Known limitations
+
+- The minimum version is Python 3.11. Locally the test suite has been run only on
+  Python 3.12; CI runs it on 3.11–3.14, but compatibility is verified only once those CI
+  runs have passed. CI runs on Ubuntu 24.04 with mocked system commands and does not test
+  real network behaviour or other distributions.
+- The Linux system tools listed in [Requirements](#requirements) are not installed by
+  pip and must be installed separately.
+- The Dockerfile does not install the package. Running the tests in a container requires
+  installing the package (for metadata) and, to test the current source, `PYTHONPATH=/app/src`.
+- The package is not published to PyPI, and building it requires setuptools, which pip
+  downloads from PyPI when it is not already available.
+- Open diagnostic limitations are listed in [known issues](tests/KNOWN_ISSUES.md).

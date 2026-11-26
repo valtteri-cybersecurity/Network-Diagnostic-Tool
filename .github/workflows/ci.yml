@@ -1,0 +1,320 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly run (Monday 04:17 UTC) so that new vulnerabilities in unchanged
+    # dependencies are found. Scheduled runs use the default branch.
+    - cron: "17 4 * * 1"
+
+# Read-only token for every job. No job needs write access.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Superseded runs are cancelled, except on main, where every commit keeps a result.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PRIMARY_PYTHON: "3.12"
+  # Installer version used in every environment; it is audited with the dependencies.
+  PIP_VERSION: "26.3"
+  PIP_AUDIT_VERSION: "2.10.1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+
+defaults:
+  run:
+    # bash -eo pipefail: a failing command in a pipeline fails the step.
+    shell: bash
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          pip-version: ${{ env.PIP_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies and the package
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip install -e .
+
+      - name: Record installed dependency versions
+        run: |
+          mkdir -p reports
+          python -m pip freeze --all --exclude-editable > "reports/installed-py${{ matrix.python-version }}.txt"
+          cat "reports/installed-py${{ matrix.python-version }}.txt"
+
+      - name: Run test suite
+        # pytest exits non-zero on failures, collection errors and when no tests are collected.
+        run: python -m pytest -ra --junitxml="reports/junit-py${{ matrix.python-version }}.xml"
+
+      - name: Upload test report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-report-py${{ matrix.python-version }}
+          path: reports/junit-py${{ matrix.python-version }}.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload installed dependency list
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependencies-py${{ matrix.python-version }}
+          path: reports/installed-py${{ matrix.python-version }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  coverage:
+    name: Coverage (Python 3.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          pip-version: ${{ env.PIP_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies and the package
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip install -e .
+
+      - name: Run test suite with coverage
+        # Measured package and branch coverage are configured in pyproject.toml.
+        run: >-
+          python -m pytest -ra
+          --cov --cov-report=term-missing
+          --cov-report=json:reports/coverage.json
+          --cov-report=xml:reports/coverage.xml
+          --cov-report=html:reports/htmlcov
+          --junitxml=reports/junit-coverage.xml
+
+      - name: Check line and branch coverage
+        run: python .github/scripts/check_coverage.py reports/coverage.json --min-line 99 --min-branch 98
+
+      - name: Run test suite in reverse order
+        env:
+          PYTHONPATH: .github/scripts
+        run: python -m pytest -q -p reverse_order -p no:cacheprovider
+
+      - name: Upload coverage reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  package:
+    name: Package build and install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          pip-version: ${{ env.PIP_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            pyproject.toml
+
+      - name: Build wheel
+        # Build isolation installs the build backend declared in pyproject.toml.
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Check wheel contents and metadata
+        run: python .github/scripts/check_package.py pyproject.toml dist
+
+      - name: Install wheel into a clean virtual environment
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "pip==$PIP_VERSION"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install --no-deps --no-index dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install -r requirements-dev.txt
+
+      - name: Check installed package location and metadata
+        # Runs outside the repository so that src/ cannot be imported by accident.
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/wheel-venv/bin/python" - <<'EOF'
+          import sys
+          import sysconfig
+          from importlib import metadata
+          from pathlib import Path
+
+          import network_diagnostic
+
+          location = Path(network_diagnostic.__file__).resolve()
+          site_packages = Path(sysconfig.get_paths()["purelib"]).resolve()
+          print("Imported from:", location)
+          print("Version:", metadata.version("network-diagnostic"))
+          if site_packages not in location.parents:
+              sys.exit(f"Package was not imported from the wheel installation in {site_packages}")
+          scripts = [entry.name for entry in metadata.entry_points(group="console_scripts")]
+          if "network-diagnostic" not in scripts:
+              sys.exit("Console script network-diagnostic is not registered")
+          EOF
+
+      - name: Smoke test entry points
+        # The main menu reads NetworkManager status once (nmcli is not installed on
+        # the runner, which is reported as an error). Input "5" exits immediately.
+        working-directory: ${{ runner.temp }}
+        env:
+          TERM: dumb
+        run: |
+          printf '5\n' | timeout 60 "$RUNNER_TEMP/wheel-venv/bin/network-diagnostic" > console-script.txt 2>&1
+          cat console-script.txt
+          grep -q "Program closed." console-script.txt
+          printf '5\n' | timeout 60 "$RUNNER_TEMP/wheel-venv/bin/python" -m network_diagnostic > module-entry.txt 2>&1
+          cat module-entry.txt
+          grep -q "Program closed." module-entry.txt
+
+      - name: Run test suite against the installed wheel
+        # A copy of the tests outside the repository uses only the installed package.
+        run: |
+          cp -r tests "$RUNNER_TEMP/installed-tests"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pytest installed-tests -ra -p no:cacheprovider
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  dependency-audit:
+    name: Dependency audit
+    needs: tests
+    # Runs even when tests fail, so that a vulnerability is reported in every run.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          pip-version: ${{ env.PIP_VERSION }}
+
+      - name: Download installed dependency lists
+        # The audited versions are exactly those installed by the test jobs.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dependencies-py*
+          path: dependency-lists
+          merge-multiple: true
+
+      - name: Install pip-audit
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-venv"
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pip install "pip==$PIP_VERSION"
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pip install "pip-audit==$PIP_AUDIT_VERSION"
+
+      - name: Audit dependencies
+        # Every list is pinned (pip freeze), so --no-deps audits exactly these direct
+        # and transitive versions. --strict fails when a package cannot be audited.
+        # Any vulnerability, network error or missing list fails this step.
+        run: |
+          shopt -s nullglob
+          lists=(dependency-lists/installed-py*.txt)
+          # One list per Python version in the tests matrix; update with the matrix.
+          if [ "${#lists[@]}" -ne 4 ]; then
+            echo "Expected 4 dependency lists, found ${#lists[@]}"
+            exit 1
+          fi
+          mkdir -p reports
+          status=0
+          for list in "${lists[@]}"; do
+            name=$(basename "$list" .txt)
+            echo "::group::Audit $name"
+            "$RUNNER_TEMP/audit-venv/bin/pip-audit" --requirement "$list" --no-deps --strict \
+              --progress-spinner off --desc on --format json --output "reports/audit-$name.json" || status=1
+            "$RUNNER_TEMP/audit-venv/bin/python" - "reports/audit-$name.json" <<'EOF' || true
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as report:
+              dependencies = json.load(report)["dependencies"]
+          for dependency in dependencies:
+              for vulnerability in dependency.get("vulns", []):
+                  fixed = ", ".join(vulnerability.get("fix_versions") or []) or "no fix"
+                  print(f"VULNERABLE {dependency['name']} {dependency['version']}: {vulnerability['id']} (fixed in {fixed})")
+          print(f"{len(dependencies)} packages audited")
+          EOF
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - name: Upload audit reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-audit
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  quality-gate:
+    name: CI Quality Gate
+    needs: [tests, coverage, package, dependency-audit]
+    # Always runs, so that a failed, cancelled or skipped required job fails the gate.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          TESTS: ${{ needs.tests.result }}
+          COVERAGE: ${{ needs.coverage.result }}
+          PACKAGE: ${{ needs.package.result }}
+          AUDIT: ${{ needs['dependency-audit'].result }}
+        run: |
+          echo "tests=$TESTS coverage=$COVERAGE package=$PACKAGE dependency-audit=$AUDIT"
+          for result in "$TESTS" "$COVERAGE" "$PACKAGE" "$AUDIT"; do
+            if [ "$result" != "success" ]; then
+              echo "A required job did not succeed."
+              exit 1
+            fi
+          done
+          echo "All required jobs succeeded."

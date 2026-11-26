@@ -4,12 +4,12 @@ from unittest.mock import Mock, call
 
 import pytest
 
-import diagnostic_service
-from exceptions import (
+from network_diagnostic import diagnostic_service
+from network_diagnostic.core.exceptions import (
     CommandError, CommandExecutionError, CommandNotFoundError, CommandTimeoutError,
     DiagnosticError, ParsingError, ValidationError,
 )
-from models import (
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus, LatencyAnalysis,
     ListeningPortReport, ListeningSocket, NetworkInterface, PacketLossStatus, PingResult,
     RoutingSnapshot, ServiceInfo, SocketCounts,
@@ -587,3 +587,28 @@ def test_get_network_interfaces_propagates_errors(error_type, monkeypatch):
 
     with pytest.raises(error_type, match="nmcli failed"):
         diagnostic_service.get_network_interfaces()
+
+
+def test_get_routing_snapshot_records_multipath_default_route_as_error(monkeypatch):
+    # Phase 13 regression: a multipath default route left the interface, address
+    # and gateway empty without any error, as if they did not exist.
+    routes = ["default proto static metric 100", "\tnexthop via 192.0.2.1 dev enp3s0 weight 1"]
+    monkeypatch.setattr(diagnostic_service.network, "get_ip_route", Mock(return_value=routes))
+    monkeypatch.setattr(diagnostic_service.network, "get_hostname", Mock(return_value="host"))
+
+    result = diagnostic_service.get_routing_snapshot()
+
+    message = "Unsupported default route: no single output interface (for example, a multipath route)"
+    assert result.routes == routes
+    assert (result.interface, result.ip_address, result.gateway) == (None, None, None)
+    assert result.errors == {"interface": message, "ip_address": message, "gateway": message}
+
+
+def test_get_connection_status_reports_unrecognized_nmcli_output_as_error(subprocess_run):
+    # Phase 13 regression: unrecognized lines were skipped, so unknown output
+    # was reported as "no connected interface" instead of an error.
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = completed("enp3s0 connected\n")
+
+    with pytest.raises(ParsingError, match="^Unrecognized line in nmcli output$"):
+        diagnostic_service.get_connection_status()

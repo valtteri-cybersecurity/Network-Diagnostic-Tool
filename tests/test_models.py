@@ -1,4 +1,4 @@
-from models import (
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     ListeningSocket, NetworkInterface, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
 )

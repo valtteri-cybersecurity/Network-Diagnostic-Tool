@@ -1,7 +1,7 @@
 import pytest
 
-from exceptions import CommandError, DiagnosticError, ValidationError
-from validation import (
+from network_diagnostic.core.exceptions import CommandError, DiagnosticError, ValidationError
+from network_diagnostic.core.validation import (
     validate_command_arguments,
     validate_host,
     validate_interface_name,

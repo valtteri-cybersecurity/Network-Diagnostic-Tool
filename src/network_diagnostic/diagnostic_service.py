@@ -2,7 +2,7 @@
 
 The CLI and a future GUI call these functions instead of the engine modules.
 The functions are synchronous, keep no state between calls, never print or
-prompt, and return the dataclasses from models.py.
+prompt, and return the dataclasses from network_diagnostic.core.models.
 
 Error contract:
 
@@ -17,17 +17,13 @@ Error contract:
 
 from typing import Sequence
 
-import analysis
-import dns
-import network
-import parsers
-import ping
-from exceptions import CommandError, CommandTimeoutError, ParsingError, ValidationError
-from models import (
+from network_diagnostic.core import analysis, dns, network, parsers, ping
+from network_diagnostic.core.exceptions import CommandError, CommandTimeoutError, ParsingError, ValidationError
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     ListeningPortReport, NetworkInterface, PingResult, RoutingSnapshot,
 )
-from validation import validate_host
+from network_diagnostic.core.validation import validate_host
 
 
 DEFAULT_DNS_HOSTNAME = "google.com"

@@ -1,0 +1,18 @@
+# Weekly update pull requests for test dependencies and GitHub Actions.
+# Pull requests get the default "dependencies" label and are merged manually after
+# CI passes; there is no automatic merge.
+# Not covered: PIP_VERSION and PIP_AUDIT_VERSION in .github/workflows/ci.yml
+# (update them manually; the weekly dependency audit reports a vulnerable pip).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

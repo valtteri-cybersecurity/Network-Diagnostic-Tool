@@ -1,5 +1,5 @@
-from command_runner import run_command
-from parsers import (
+from network_diagnostic.core.command_runner import run_command
+from network_diagnostic.core.parsers import (
     parse_default_gateway, parse_default_interface, parse_default_source,
     parse_interface_ipv4_address, parse_nmcli_states,
 )

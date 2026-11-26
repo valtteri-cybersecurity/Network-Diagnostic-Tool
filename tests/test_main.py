@@ -1,19 +1,20 @@
-import builtins
 from dataclasses import replace
+from importlib import metadata
 import runpy
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock, call
 
 import pytest
 
-import main
-from models import (
+from network_diagnostic.cli import main
+from network_diagnostic.core.models import (
     DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
     LatencyAnalysis, ListeningPortReport, ListeningSocket, NetworkInterface, PingResult,
     RoutingSnapshot, ServiceInfo, SocketCounts,
 )
-from exceptions import (
+from network_diagnostic.core.exceptions import (
     CommandError, CommandNotFoundError, CommandTimeoutError, CommandExecutionError, DiagnosticError,
     ParsingError, ValidationError,
 )
@@ -404,19 +405,30 @@ def test_main_returns_to_main_menu_after_diagnostic_error(
 
 
 @pytest.mark.parametrize("inputs", [["5"], [KeyboardInterrupt()], [EOFError()]])
-def test_script_entry_displays_exit_message_after_exit_or_interruption(
+def test_module_entry_displays_exit_message_after_exit_or_interruption(
     inputs, user_input, monkeypatch,
 ):
-    read_input = Mock(side_effect=inputs)
+    user_input.side_effect = inputs
     display_exit = Mock()
-    monkeypatch.setattr(builtins, "input", read_input)
     monkeypatch.setattr(main.output, "display_exit_message", display_exit)
 
-    runpy.run_path(str(Path(main.__file__)), run_name="__main__")
+    # Equivalent to: python -m network_diagnostic. A new interpreter has not
+    # imported __main__ yet; another test may have, which makes runpy warn.
+    monkeypatch.delitem(sys.modules, "network_diagnostic.__main__", raising=False)
+    runpy.run_module("network_diagnostic", run_name="__main__", alter_sys=False)
 
-    read_input.assert_called_once_with()
+    user_input.assert_called_once_with()
     display_exit.assert_called_once_with()
-    user_input.assert_not_called()
+
+
+def test_console_script_and_module_entry_use_the_same_run_function():
+    import network_diagnostic.__main__ as module_entry
+
+    entry_points = metadata.distribution("network-diagnostic").entry_points
+    scripts = {entry.name: entry.value for entry in entry_points if entry.group == "console_scripts"}
+
+    assert scripts == {"network-diagnostic": "network_diagnostic.cli.main:run"}
+    assert module_entry.run is main.run
 
 
 def test_main_displays_snapshot_without_default_route(user_input, subprocess_run, monkeypatch):

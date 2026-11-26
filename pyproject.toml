@@ -1,0 +1,30 @@
+[build-system]
+# setuptools 64 adds PEP 660 editable installs for the src layout.
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "network-diagnostic"
+version = "0.1.0"
+description = "Linux network diagnostics: ping, DNS, sockets, routing, and interface status."
+readme = "README.md"
+# Minimum 3.11 (oldest security-supported version). The test suite has been run
+# only on Python 3.12, the primary development version; 3.11, 3.13 and 3.14 are untested.
+requires-python = ">=3.11"
+# Standard library only. Linux diagnostic commands are system tools, see README.md.
+dependencies = []
+
+[project.scripts]
+network-diagnostic = "network_diagnostic.cli.main:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Test dependencies are listed only in requirements-dev.txt (also used by the Dockerfile).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["network_diagnostic"]
+branch = true

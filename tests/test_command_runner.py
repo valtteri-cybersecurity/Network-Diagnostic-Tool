@@ -4,12 +4,12 @@ from unittest.mock import Mock
 
 import pytest
 
-import command_runner
-from exceptions import (
+from network_diagnostic.core import command_runner
+from network_diagnostic.core.exceptions import (
     DiagnosticError, CommandError, CommandNotFoundError,
     CommandTimeoutError, CommandExecutionError, ValidationError,
 )
-from models import CommandResult
+from network_diagnostic.core.models import CommandResult
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +57,7 @@ def test_run_command_returns_structured_result_and_safe_execution_options(
     assert result == CommandResult(["hostname"], "host\n", "notice\n", 0, 0.25)
     prepare_environment.assert_called_once_with()
     subprocess_run.assert_called_once_with(
-        ["hostname"], capture_output=True, text=True, timeout=10,
+        ["hostname"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         env=environment, shell=False, check=False,
     )
     assert monotonic_clock.call_count == 2
@@ -260,3 +260,24 @@ def test_run_command_accepts_maximum_timeout(subprocess_run):
     command_runner.run_command(["hostname"], timeout=60)
 
     assert subprocess_run.call_args.kwargs["timeout"] == 60
+
+
+def test_run_command_replaces_undecodable_output_instead_of_raising(subprocess_run):
+    # Phase 13 regression: text mode decoded output strictly with the locale
+    # encoding, so one invalid byte (for example, in /etc/hosts aliases or a
+    # connection name) raised UnicodeDecodeError past every DiagnosticError
+    # handler. The fake decodes like subprocess text mode in a UTF-8 locale.
+    def decode_like_text_mode(arguments, **options):
+        encoding = options.get("encoding") or "utf-8"
+        errors = options.get("errors") or "strict"
+        return subprocess.CompletedProcess(
+            arguments, 0,
+            b"192.0.2.10 host \xff\n".decode(encoding, errors), b"warn \xfe\n".decode(encoding, errors),
+        )
+
+    subprocess_run.side_effect = decode_like_text_mode
+
+    result = command_runner.run_command(["getent", "hosts", "example.com"])
+
+    assert result.stdout == "192.0.2.10 host �\n"
+    assert result.stderr == "warn �\n"

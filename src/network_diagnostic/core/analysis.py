@@ -1,11 +1,11 @@
 import math
 from typing import Optional
 
-from models import (
+from network_diagnostic.core.models import (
     DnsLatencyResult, LatencyAnalysis, ListeningSocket, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
 )
-from exceptions import ParsingError
-from parsers import MAX_PORT, parse_port
+from network_diagnostic.core.exceptions import ParsingError
+from network_diagnostic.core.parsers import MAX_PORT, parse_port
 
 
 # Services in get_known_ports() that use only one transport protocol. The same
