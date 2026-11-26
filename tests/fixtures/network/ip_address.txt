@@ -1,0 +1,2 @@
+2: enp3s0    inet 192.0.2.10/24 brd 192.0.2.255 scope global dynamic noprefixroute enp3s0\       valid_lft 86399sec preferred_lft 86399sec
+2: enp3s0    inet 192.0.2.11/24 brd 192.0.2.255 scope global secondary enp3s0\       valid_lft forever preferred_lft forever

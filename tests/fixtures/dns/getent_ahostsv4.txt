@@ -1,0 +1,6 @@
+192.0.2.10      STREAM example.com
+192.0.2.10      DGRAM
+192.0.2.10      RAW
+192.0.2.20      STREAM
+192.0.2.20      DGRAM
+192.0.2.20      RAW

@@ -1,114 +1,71 @@
-import os
-import subprocess
-
+from command_runner import run_command
+from exceptions import CommandError, CommandTimeoutError, DiagnosticError
+from models import CommandResult, ExecutionStatus, PingResult
 from network import get_gateway
-from analysis import analyze_jitter, ping_latency_analyzation
-from output import display_ping_report, display_ping_result
+from analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
 
 
 PING_TIMEOUT = 10
 PING_COUNT = 3
 
 
-def _run_ping(target):
-    environment = os.environ.copy()
-    environment["LC_ALL"] = "C"
-
-    try:
-        result = subprocess.run(
-            ["ping", "-n", "-c", str(PING_COUNT), target],
-            capture_output=True,
-            text=True,
-            timeout=PING_TIMEOUT,
-            check=False,
-            env=environment
-        )
-
-    except subprocess.TimeoutExpired as error:
-        partial_output = error.stdout or ""
-
-        if isinstance(partial_output, bytes):
-            partial_output = partial_output.decode(
-                "utf-8",
-                errors="replace"
-            )
-
-        return (
-            f"PING_ERROR: Ping timed out after {PING_TIMEOUT} seconds.\n"
-            f"{partial_output}"
-        )
-
-    except FileNotFoundError:
-        return "PING_ERROR: The ping command was not found."
-
-    except OSError as error:
-        return f"PING_ERROR: Could not execute ping: {error}"
-
-    output = result.stdout.strip()
-
-    if output:
-        return output
-
-    error_output = result.stderr.strip()
-
-    if error_output:
-        return f"PING_ERROR: {error_output}"
-
-    return (
-        f"PING_ERROR: Ping exited with return code "
-        f"{result.returncode} without output."
+def _run_ping(target: str) -> CommandResult:
+    return run_command(
+        ["ping", "-n", "-c", str(PING_COUNT), target],
+        allowed_codes=(0, 1), timeout=PING_TIMEOUT,
     )
 
 
-def ping_localhost():
+def ping_localhost() -> CommandResult:
     return _run_ping("127.0.0.1")
 
 
-def ping_gateway():
+def ping_gateway() -> CommandResult:
     gateway = get_gateway()
-
     if gateway is None:
-        return "PING_ERROR: Could not detect the default gateway."
-
+        raise DiagnosticError("Could not detect the default gateway.")
     return _run_ping(gateway)
 
 
-def ping_internet_dns():
+def ping_internet_dns() -> CommandResult:
     return _run_ping("google.com")
 
 
-def ping_internet():
+def ping_internet() -> CommandResult:
     return _run_ping("8.8.8.8")
 
 
-def ping_target(target):
+def ping_target(target: str) -> PingResult:
     targets = {
         "localhost": ping_localhost,
         "gateway": ping_gateway,
         "internet": ping_internet,
-        "google.com": ping_internet_dns
+        "google.com": ping_internet_dns,
     }
-
     ping_function = targets.get(target)
-
     if ping_function is None:
-        return f"PING_ERROR: Unknown ping target: {target}"
+        return PingResult(target=target, error=f"Unknown ping target: {target}")
 
-    return ping_function()
+    try:
+        result = ping_function()
+    except CommandTimeoutError as error:
+        return PingResult(
+            target=target, execution_status=ExecutionStatus.TIMEOUT,
+            error=str(error), raw_output=error.stdout,
+        )
+    except DiagnosticError as error:
+        return PingResult(
+            target=target, error=str(error),
+            raw_output=error.stdout if isinstance(error, CommandError) else "",
+        )
+
+    if not result.stdout.strip() and result.stderr.strip():
+        return PingResult(target=target, error=result.stderr.strip(), raw_output=result.stdout)
+    return get_ping_statistics(result.stdout, target)
 
 
-def get_ping_statistics(result, reason):
-    report = {
-        "status": "failed",
-        "reason": reason,
-        "sent": None,
-        "received": None,
-        "loss": None
-    }
-
-    if result.startswith("PING_ERROR:"):
-        report["error"] = result.removeprefix("PING_ERROR:").strip()
-        return report
+def get_ping_statistics(result: str, target: str) -> PingResult:
+    report = PingResult(target=target, raw_output=result)
 
     transmitted_report = None
     latency_report = None
@@ -121,7 +78,7 @@ def get_ping_statistics(result, reason):
             latency_report = line
 
     if transmitted_report is None:
-        report["error"] = "No packet statistics found"
+        report.error = "No packet statistics found"
         return report
 
     try:
@@ -129,26 +86,34 @@ def get_ping_statistics(result, reason):
             action = action.strip()
 
             if "transmitted" in action:
-                report["sent"] = int(action.split()[0])
+                report.packets_sent = int(action.split()[0])
 
             elif "received" in action:
-                report["received"] = int(action.split()[0])
+                report.packets_received = int(action.split()[0])
 
             elif "packet loss" in action:
-                report["loss"] = float(
+                report.packet_loss_percent = float(
                     action.split()[0].replace("%", "")
                 )
 
     except (ValueError, IndexError):
-        report["error"] = "Unable to parse packet statistics"
+        report.error = "Unable to parse packet statistics"
         return report
 
-    if any(report[key] is None for key in ("sent", "received", "loss")):
-        report["error"] = "Incomplete packet statistics"
+    if any(value is None for value in (
+        report.packets_sent, report.packets_received, report.packet_loss_percent,
+    )):
+        report.error = "Incomplete packet statistics"
         return report
 
+    if report.packets_received > 0:
+        report.reachable = True
     if latency_report is None:
-        report["error"] = "No latency data available"
+        if report.packets_received == 0:
+            report.execution_status = ExecutionStatus.COMPLETED
+            report.reachable = False
+            return report
+        report.error = "No latency data available"
         return report
 
     try:
@@ -157,44 +122,32 @@ def get_ping_statistics(result, reason):
 
         min_value, avg_value, max_value, mdev = latency_values.split("/")
 
-        report.update({
-            "status": "success",
-            "avg": float(avg_value),
-            "min": float(min_value),
-            "max": float(max_value)
-        })
+        minimum = float(min_value)
+        average = float(avg_value)
+        maximum = float(max_value)
+        deviation = float(mdev)
+        report.min_rtt_ms = minimum
+        report.avg_rtt_ms = average
+        report.max_rtt_ms = maximum
+        report.mdev_ms = deviation
+        report.reachable = report.packets_received > 0
+        report.execution_status = ExecutionStatus.COMPLETED
 
     except (ValueError, IndexError):
-        report["error"] = "Unable to parse latency statistics"
+        report.error = "Unable to parse latency statistics"
 
     return report
 
 
-def handle_ping(target):
-    result = ping_target(target)
+def run_ping_diagnostic(target: str) -> PingResult:
+    """Return measurements and analyses without interacting with a user interface."""
+    report = ping_target(target)
+    report.packet_loss_status = analyze_packet_loss(report.packet_loss_percent)
 
-    report = get_ping_statistics(result, "")
-    report["reason"] = display_ping_result(result, report)
+    if report.execution_status is ExecutionStatus.COMPLETED:
+        if report.min_rtt_ms is not None and report.max_rtt_ms is not None:
+            report.rtt_range_analysis = analyze_jitter(report.min_rtt_ms, report.max_rtt_ms)
+        if report.avg_rtt_ms is not None:
+            report.latency_analysis = ping_latency_analyzation(report)
 
-    if report["status"] != "success":
-        display_ping_report(
-            report,
-            target,
-            "Not available",
-            "Not available"
-        )
-        return
-
-    jitter_state = analyze_jitter(
-        report["min"],
-        report["max"]
-    )
-
-    latency_analysis = ping_latency_analyzation(report)
-
-    display_ping_report(
-        report,
-        target,
-        jitter_state,
-        latency_analysis
-    )
+    return report

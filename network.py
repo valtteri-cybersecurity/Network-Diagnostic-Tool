@@ -1,50 +1,5 @@
-import os
-import subprocess
-
-
-COMMAND_TIMEOUT = 10
-
-
-class CommandError(Exception):
-    pass
-
-
-def command_environment():
-    environment = os.environ.copy()
-    environment["LC_ALL"] = "C"
-    return environment
-
-
-def run_command(arguments, allowed_codes=(0,)):
-    try:
-        result = subprocess.run(
-            arguments,
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT,
-            env=command_environment()
-        )
-
-    except FileNotFoundError as error:
-        raise CommandError(
-            f"Required command not found: {arguments[0]}"
-        ) from error
-
-    except subprocess.TimeoutExpired as error:
-        raise CommandError(
-            f"{arguments[0]} timed out after {COMMAND_TIMEOUT} seconds."
-        ) from error
-
-    except OSError as error:
-        raise CommandError(
-            f"Could not execute {arguments[0]}: {error}"
-        ) from error
-
-    if result.returncode not in allowed_codes:
-        detail = result.stderr.strip() or f"exit code {result.returncode}"
-        raise CommandError(f"{arguments[0]} failed: {detail}")
-
-    return result
+from command_runner import run_command
+from models import ListeningSocket, NetworkInterface
 
 
 def nmcli_status():
@@ -92,7 +47,7 @@ def split_nmcli_fields(line):
     return fields
 
 
-def parse_nmcli_output(results):
+def parse_nmcli_output(results: list[str]) -> list[NetworkInterface]:
     parsed = []
 
     for line in results:
@@ -103,12 +58,10 @@ def parse_nmcli_output(results):
 
         device, interface_type, state, connection = parts
 
-        parsed.append({
-            "device": device,
-            "type": interface_type,
-            "state": state,
-            "connection": connection
-        })
+        parsed.append(NetworkInterface(
+            device=device, interface_type=interface_type,
+            state=state, connection=connection,
+        ))
 
     return parsed
 
@@ -119,7 +72,7 @@ def get_listening_sockets():
     return result.stdout.strip().splitlines()
 
 
-def parse_ss_output(results):
+def parse_ss_output(results: list[str]) -> list[ListeningSocket]:
     sockets = []
 
     for line in results:
@@ -139,14 +92,11 @@ def parse_ss_output(results):
         except ValueError:
             continue
 
-        sockets.append({
-            "protocol": protocol,
-            "state": state,
-            "local_address": local_address,
-            "local_port": local_port,
-            "peer_address": peer_address,
-            "peer_port": peer_port
-        })
+        sockets.append(ListeningSocket(
+            protocol=protocol, state=state,
+            local_address=local_address, local_port=local_port,
+            peer_address=peer_address, peer_port=peer_port,
+        ))
 
     return sockets
 

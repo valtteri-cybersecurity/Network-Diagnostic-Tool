@@ -4,6 +4,8 @@ import network
 import output
 import ping
 
+from exceptions import CommandError
+
 
 def read_menu_choice(max_choice):
     while True:
@@ -28,7 +30,7 @@ def main():
         try:
             try:
                 network_connected = network.get_network_plugin()
-            except network.CommandError as error:
+            except CommandError as error:
                 output.display_command_error(str(error))
                 network_connected = None
 
@@ -57,7 +59,8 @@ def main():
                     }
 
                     output.clear_screen()
-                    ping.handle_ping(targets[submenu_choice])
+                    report = ping.run_ping_diagnostic(targets[submenu_choice])
+                    output.display_ping_report(report)
 
             elif choice == 2:
                 while True:
@@ -77,12 +80,11 @@ def main():
                     elif submenu_choice == 2:
                         result = dns.dns_latency("google.com")
 
-                        if result["dns_latency_ms"] is not None:
-                            result["analysis"] = (
-                                analysis.dns_latency_analyzation(result)
-                            )
+                        latency_analysis = None
+                        if result.dns_latency_ms is not None:
+                            latency_analysis = analysis.dns_latency_analyzation(result)
 
-                        output.dns_latency_output(result)
+                        output.dns_latency_output(result, latency_analysis)
 
                     elif submenu_choice == 3:
                         sites = [
@@ -153,7 +155,7 @@ def main():
 
                         output.display_network_interface_status(interface_data)
 
-        except network.CommandError as error:
+        except CommandError as error:
             output.display_command_error(str(error))
 
 

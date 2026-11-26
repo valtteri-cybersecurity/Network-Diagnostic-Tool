@@ -1,0 +1,3 @@
+# Both versions support the project's minimum Python version, 3.9.
+pytest==8.4.2
+pytest-cov==7.0.0

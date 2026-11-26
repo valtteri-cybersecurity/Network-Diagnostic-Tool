@@ -1,0 +1,6 @@
+udp   UNCONN 0 0 127.0.0.53%lo:53   0.0.0.0:*
+udp   UNCONN 0 0 [fe80::1%enp3s0]:546 [::]:*
+tcp   LISTEN 0 4096 0.0.0.0:22       0.0.0.0:*
+tcp   LISTEN 0 4096 [::]:22          [::]:*
+tcp   LISTEN 0 128  [2001:db8::10]:443 [::]:*
+tcp   LISTEN 0 128  *:8080           *:*

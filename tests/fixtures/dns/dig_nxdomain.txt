@@ -1,0 +1,17 @@
+
+; <<>> DiG 9.18.30 <<>> +time=3 +tries=1 +stats missing.example.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 12346
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; QUESTION SECTION:
+;missing.example.com.           IN      A
+
+;; AUTHORITY SECTION:
+example.com.            300     IN      SOA     ns.example.com. hostmaster.example.com. 2026112501 3600 600 86400 300
+
+;; Query time: 4 msec
+;; SERVER: 127.0.0.53#53(127.0.0.53) (UDP)
+;; WHEN: Wed Nov 25 12:00:01 EET 2026
+;; MSG SIZE  rcvd: 105

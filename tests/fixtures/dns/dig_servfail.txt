@@ -1,0 +1,14 @@
+
+; <<>> DiG 9.18.30 <<>> +time=3 +tries=1 +stats example.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 12347
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; QUESTION SECTION:
+;example.com.                   IN      A
+
+;; Query time: 8 msec
+;; SERVER: 127.0.0.53#53(127.0.0.53) (UDP)
+;; WHEN: Wed Nov 25 12:00:02 EET 2026
+;; MSG SIZE  rcvd: 40

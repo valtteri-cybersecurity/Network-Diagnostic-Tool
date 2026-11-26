@@ -1,32 +1,30 @@
 import ipaddress
 import re
 
-from network import run_command
+from command_runner import run_command
+from models import CommandResult, DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus
 
 
-def dns_run(site):
+def dns_run(site: str) -> CommandResult:
     return run_command(
         ["getent", "hosts", site],
         allowed_codes=(0, 2)
     )
 
 
-def ipv_check(site):
-    addresses = {
-        "ipv4": [],
-        "ipv6": []
-    }
+def ipv_check(site: str) -> DnsAddressResult:
+    addresses = DnsAddressResult(hostname=site, execution_status=ExecutionStatus.COMPLETED)
 
-    for field, database, version in (
-        ("ipv4", "ahostsv4", 4),
-        ("ipv6", "ahostsv6", 6)
+    for address_list, database, version in (
+        (addresses.ipv4_addresses, "ahostsv4", 4),
+        (addresses.ipv6_addresses, "ahostsv6", 6),
     ):
         result = run_command(
             ["getent", database, site],
             allowed_codes=(0, 2)
         )
 
-        if result.returncode != 0:
+        if result.return_code != 0:
             continue
 
         for line in result.stdout.splitlines():
@@ -45,29 +43,24 @@ def ipv_check(site):
 
             value = str(address)
 
-            if value not in addresses[field]:
-                addresses[field].append(value)
+            if value not in address_list:
+                address_list.append(value)
 
-    return {
-        "site": site,
-        **addresses
-    }
+    return addresses
 
 
-def dns_query(site):
+def dns_query(site: str) -> DnsQueryResult:
     result = dns_run(site)
     text = result.stdout.strip()
-    resolved = result.returncode == 0 and bool(text)
+    resolved = result.return_code == 0 and bool(text)
 
-    return {
-        "site": site,
-        "status": "OK" if resolved else "FAILED",
-        "resolved": resolved,
-        "ip": text.split()[0] if resolved else None
-    }
+    return DnsQueryResult(
+        hostname=site, execution_status=ExecutionStatus.COMPLETED,
+        resolved=resolved, ip_address=text.split()[0] if resolved else None,
+    )
 
 
-def dns_latency(site):
+def dns_latency(site: str) -> DnsLatencyResult:
     result = run_command(
         ["dig", "+time=3", "+tries=1", "+stats", site]
     )
@@ -87,12 +80,21 @@ def dns_latency(site):
         result.stdout
     )
 
-    dns_status = status_match.group(1) if status_match else "UNKNOWN"
-    answer_count = int(answer_match.group(1)) if answer_match else 0
+    dns_status = status_match.group(1) if status_match else None
+    answer_count = int(answer_match.group(1)) if answer_match else None
 
-    return {
-        "site": site,
-        "dns_latency_ms": float(time_match.group(1)) if time_match else None,
-        "dns_status": dns_status,
-        "resolved": dns_status == "NOERROR" and answer_count > 0
-    }
+    resolved = None
+    if dns_status is not None:
+        if dns_status != "NOERROR":
+            resolved = False
+        elif answer_count is not None:
+            resolved = answer_count > 0
+
+    return DnsLatencyResult(
+        hostname=site,
+        execution_status=ExecutionStatus.COMPLETED if status_match else ExecutionStatus.FAILED,
+        dns_status=dns_status, resolved=resolved,
+        dns_latency_ms=float(time_match.group(1)) if time_match else None,
+        answer_count=answer_count,
+        error=None if status_match else "Unable to parse DNS response status",
+    )

@@ -1,5 +1,11 @@
 import os
 from datetime import datetime
+from typing import Optional
+
+from models import (
+    DnsAddressResult, DnsLatencyResult, DnsQueryResult, ExecutionStatus,
+    LatencyAnalysis, ListeningSocket, NetworkInterface, PacketLossStatus, PingResult, ServiceInfo, SocketCounts,
+)
 
 
 MENU_WIDTH = 60
@@ -122,78 +128,89 @@ def dns_output_header(title):
     print()
 
 
-def display_ping_result(result, report):
-    print(result)
-    print()
+def display_ping_result(result: PingResult) -> None:
+    if result.raw_output:
+        print(result.raw_output)
+        print()
+    if result.error is not None:
+        print(f"Error: {result.error}")
 
-    if result.startswith("PING_ERROR:"):
-        return result.removeprefix("PING_ERROR:").strip()
 
-    loss = report.get("loss")
-
-    if loss is None:
-        return "Packet loss information is unavailable."
-
-    if loss == 100:
-        return (
+def display_ping_report(result: PingResult) -> None:
+    display_ping_result(result)
+    explanations = {
+        PacketLossStatus.UNAVAILABLE: "Packet loss information is unavailable.",
+        PacketLossStatus.TOTAL_LOSS: (
             "No test packets were received. The target did not respond "
             "or ICMP traffic is blocked."
-        )
-
-    if loss == 0:
-        return "All test packets were received."
-
-    if 0 < loss < 100:
-        return (
-            f"{loss:g}% of test packets were lost. "
+        ),
+        PacketLossStatus.NO_LOSS: "All test packets were received.",
+        PacketLossStatus.INVALID: "Invalid packet loss value.",
+    }
+    if result.error is not None:
+        reason = result.error
+    elif result.packet_loss_status is PacketLossStatus.PARTIAL_LOSS:
+        reason = (
+            f"{result.packet_loss_percent:g}% of test packets were lost. "
             "Packet loss may indicate a connection problem."
         )
+    else:
+        reason = explanations[result.packet_loss_status]
 
-    return "Invalid packet loss value."
-
-
-def display_ping_report(report, target, jitter, latency):
-    title = f"{target.upper()} PING REPORT"
-
+    title = f"{result.target.upper()} PING REPORT"
     print(title)
     print("-" * len(title))
 
-    for key, value in report.items():
-        if key in ("avg", "min", "max") and value is not None:
+    fields = (
+        ("status", result.execution_status.value), ("reason", reason),
+        ("sent", result.packets_sent), ("received", result.packets_received),
+        ("loss", result.packet_loss_percent), ("min", result.min_rtt_ms),
+        ("avg", result.avg_rtt_ms), ("max", result.max_rtt_ms),
+        ("mdev", result.mdev_ms), ("reachable", result.reachable),
+    )
+    for key, value in fields:
+        if key in ("avg", "min", "max", "mdev") and value is not None:
             print(f"{key:<20}: {value} ms")
         elif key == "loss" and value is not None:
             print(f"{key:<20}: {value:g}%")
         else:
             print(f"{key:<20}: {value}")
+    if result.error is not None:
+        print(f"{'error':<20}: {result.error}")
 
     print()
+    latency = result.latency_analysis if result.latency_analysis is not None else "Not available"
+    rtt_range = result.rtt_range_analysis if result.rtt_range_analysis is not None else "Not available"
     print(f"{'Latency analysis':<20}: {latency}")
-    print(f"{'RTT range analysis':<20}: {jitter}")
+    print(f"{'RTT range analysis':<20}: {rtt_range}")
     print()
 
 
-def dns_query_output(result):
+def dns_query_output(result: DnsQueryResult):
     dns_output_header("HOSTNAME RESOLUTION TEST")
+    status = "UNKNOWN"
+    if result.resolved is not None:
+        status = "OK" if result.resolved else "FAILED"
 
-    site = result.get("site", "Unknown")
-    status = result.get("status", "UNKNOWN")
-    ip = result.get("ip")
-
-    print(f"Hostname  : {site}")
+    print(f"Hostname  : {result.hostname or 'Unknown'}")
+    print(f"Execution : {result.execution_status.value}")
     print(f"Status    : {status}")
-    print(f"IP address: {ip if ip else 'No address found'}")
+    print(f"IP address: {result.ip_address or 'No address found'}")
+    if result.error is not None:
+        print(f"Error     : {result.error}")
     print()
 
 
-def dns_latency_output(result):
+def dns_latency_output(result: DnsLatencyResult, analysis: Optional[LatencyAnalysis] = None):
     dns_output_header("DNS LATENCY TEST")
-
-    site = result.get("site", "Unknown")
-    latency = result.get("dns_latency_ms")
-
-    print(f"Hostname  : {site}")
-    print(f"DNS status: {result.get('dns_status', 'UNKNOWN')}")
-    print(f"Resolved  : {'Yes' if result.get('resolved') else 'No'}")
+    latency = result.dns_latency_ms
+    resolved = "Unknown" if result.resolved is None else ("Yes" if result.resolved else "No")
+    print(f"Hostname  : {result.hostname or 'Unknown'}")
+    print(f"Execution : {result.execution_status.value}")
+    print(f"DNS status: {result.dns_status or 'UNKNOWN'}")
+    print(f"Resolved  : {resolved}")
+    if result.error is not None:
+        print(f"Error     : {result.error}")
 
     if latency is None:
         print("Latency   : Measurement unavailable")
@@ -201,46 +218,42 @@ def dns_latency_output(result):
         print()
         return
 
-    analysis_result = result.get("analysis", {})
-    status = analysis_result.get("status", "UNKNOWN")
-
+    status = analysis.status if analysis is not None else "UNKNOWN"
     descriptions = {
         "EXCELLENT": "Excellent - very fast DNS response",
         "GOOD": "Good - fast DNS response",
-        "SLOW": "Slow - DNS response may need investigation"
+        "SLOW": "Slow - DNS response may need investigation",
     }
-
-    print("Status    : Measurement completed")
+    if result.execution_status is ExecutionStatus.COMPLETED:
+        print("Status    : Measurement completed")
+    else:
+        print("Status    : Measurement failed")
     print(f"Latency   : {latency:.2f} ms")
     print(f"Analysis  : {descriptions.get(status, status)}")
     print()
 
 
-def ipv_check_output(result):
-    site = result.get("site", "Unknown")
-    ipv4 = result.get("ipv4", [])
-    ipv6 = result.get("ipv6", [])
-
-    print(f"Hostname : {site}")
-
-    if ipv4:
+def ipv_check_output(result: DnsAddressResult):
+    print(f"Hostname : {result.hostname or 'Unknown'}")
+    print(f"Execution: {result.execution_status.value}")
+    if result.ipv4_addresses:
         print("IPv4 addresses:")
-        for address in ipv4:
+        for address in result.ipv4_addresses:
             print(f"  - {address}")
     else:
         print("IPv4 addresses: None found")
-
-    if ipv6:
+    if result.ipv6_addresses:
         print("IPv6 addresses:")
-        for address in ipv6:
+        for address in result.ipv6_addresses:
             print(f"  - {address}")
     else:
         print("IPv6 addresses: None found")
-
+    if result.error is not None:
+        print(f"Error    : {result.error}")
     print()
 
 
-def ipv_check_results_output(results):
+def ipv_check_results_output(results: list[DnsAddressResult]):
     dns_output_header("RESOLVED IPv4 / IPv6 ADDRESSES")
 
     for result in results:
@@ -255,13 +268,13 @@ def display_open_ports_header():
     print()
 
 
-def display_open_ports_count(counts):
-    print(f"Total {counts['tcp']} listening TCP sockets")
-    print(f"Total {counts['udp']} unconnected UDP sockets")
+def display_open_ports_count(counts: SocketCounts):
+    print(f"Total {counts.tcp_count} listening TCP sockets")
+    print(f"Total {counts.udp_count} unconnected UDP sockets")
     print()
 
 
-def display_open_ports(open_port_data):
+def display_open_ports(open_port_data: list[ListeningSocket]):
     if not open_port_data:
         print("No matching TCP or UDP sockets found.")
         print()
@@ -283,10 +296,10 @@ def display_open_ports(open_port_data):
     print("-" * len(header))
 
     for item in open_port_data:
-        protocol = item.get("protocol", "UNKNOWN")
-        state = item.get("state", "UNKNOWN")
-        address = item.get("local_address", "UNKNOWN")
-        port = item.get("local_port", "UNKNOWN")
+        protocol = item.protocol if item.protocol is not None else "UNKNOWN"
+        state = item.state if item.state is not None else "UNKNOWN"
+        address = item.local_address if item.local_address is not None else "UNKNOWN"
+        port = item.local_port if item.local_port is not None else "UNKNOWN"
 
         print(
             f"{protocol:<{protocol_width}}"
@@ -298,7 +311,7 @@ def display_open_ports(open_port_data):
     print()
 
 
-def display_known_services(services):
+def display_known_services(services: list[ServiceInfo]):
     title = "COMMON SERVICE NAMES BY PORT"
 
     print(title)
@@ -325,10 +338,10 @@ def display_known_services(services):
     print("-" * len(header))
 
     for item in services:
-        protocol = item.get("protocol", "UNKNOWN")
-        address = item.get("local_address", "UNKNOWN")
-        port = item.get("port", "UNKNOWN")
-        service = item.get("service", "UNKNOWN")
+        protocol = item.protocol if item.protocol is not None else "UNKNOWN"
+        address = item.local_address if item.local_address is not None else "UNKNOWN"
+        port = item.port if item.port is not None else "UNKNOWN"
+        service = item.service_name if item.service_name is not None else "UNKNOWN"
 
         print(
             f"{protocol:<{protocol_width}}"
@@ -369,7 +382,7 @@ def display_routing_table(
     print()
 
 
-def display_network_interface_status(interface_data):
+def display_network_interface_status(interface_data: list[NetworkInterface]):
     title = "NETWORK INTERFACE STATUS"
 
     print()
@@ -382,8 +395,8 @@ def display_network_interface_status(interface_data):
         return
 
     for item in interface_data:
-        print(f"Device    : {item.get('device', 'UNKNOWN')}")
-        print(f"Type      : {item.get('type', 'UNKNOWN')}")
-        print(f"State     : {item.get('state', 'UNKNOWN')}")
-        print(f"Connection: {item.get('connection') or '--'}")
+        print(f"Device    : {item.device if item.device is not None else 'UNKNOWN'}")
+        print(f"Type      : {item.interface_type if item.interface_type is not None else 'UNKNOWN'}")
+        print(f"State     : {item.state if item.state is not None else 'UNKNOWN'}")
+        print(f"Connection: {item.connection or '--'}")
         print()

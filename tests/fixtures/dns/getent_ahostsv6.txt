@@ -1,0 +1,6 @@
+2001:db8::10    STREAM example.com
+2001:db8::10    DGRAM
+2001:db8::10    RAW
+2001:db8::20    STREAM
+2001:db8::20    DGRAM
+2001:db8::20    RAW

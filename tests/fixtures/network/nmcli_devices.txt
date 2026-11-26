@@ -1,0 +1,4 @@
+enp3s0:ethernet:connected:Wired connection 1
+wlp2s0:wifi:connected:Office\: WiFi\\Guest
+lo:loopback:connected (externally):lo
+enp4s0:ethernet:disconnected:
