@@ -2,6 +2,8 @@ import pytest
 
 from network_diagnostic.core.exceptions import CommandError, DiagnosticError, ValidationError
 from network_diagnostic.core.validation import (
+    MAX_ARGUMENT_LENGTH,
+    MAX_ARGUMENTS,
     validate_command_arguments,
     validate_host,
     validate_interface_name,
@@ -150,6 +152,37 @@ def test_validate_command_arguments_rejects_invalid_lists(arguments):
 def test_validate_command_arguments_rejects_nul_characters(arguments):
     with pytest.raises(ValidationError, match="arguments must not contain NUL"):
         validate_command_arguments(arguments)
+
+
+CONTROL_CHARACTERS = [chr(code) for code in range(1, 32)] + ["\x7f"]
+
+
+@pytest.mark.parametrize("character", CONTROL_CHARACTERS, ids=lambda c: f"U+{ord(c):04X}")
+def test_validate_command_arguments_rejects_every_control_character(character):
+    for arguments in ([f"ping{character}"], ["ping", f"127.0.0.1{character}"], ["ping", f"{character}"]):
+        with pytest.raises(ValidationError, match="arguments must not contain control characters"):
+            validate_command_arguments(arguments)
+
+
+def test_validate_command_arguments_keeps_spaces_empty_arguments_and_non_ascii_text():
+    assert validate_command_arguments(["ping", "", " ", "two words", "\u00e4\u00f6"]) is None
+
+
+def test_validate_command_arguments_enforces_count_boundary():
+    assert validate_command_arguments(["ping"] * MAX_ARGUMENTS) is None
+
+    with pytest.raises(ValidationError, match="at most"):
+        validate_command_arguments(["ping"] * (MAX_ARGUMENTS + 1))
+
+
+def test_validate_command_arguments_enforces_length_boundary_for_every_item():
+    assert validate_command_arguments(["ping", "a" * MAX_ARGUMENT_LENGTH]) is None
+    assert validate_command_arguments(["a" * MAX_ARGUMENT_LENGTH]) is None
+
+    with pytest.raises(ValidationError, match="characters long"):
+        validate_command_arguments(["ping", "a" * (MAX_ARGUMENT_LENGTH + 1)])
+    with pytest.raises(ValidationError, match="characters long"):
+        validate_command_arguments(["a" * (MAX_ARGUMENT_LENGTH + 1)])
 
 
 @pytest.mark.parametrize("timeout", [10, 0.5, 3, 1e-9, 60, 60.0])

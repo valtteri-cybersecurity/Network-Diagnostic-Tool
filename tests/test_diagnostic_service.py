@@ -12,6 +12,7 @@ from network_diagnostic import diagnostic_service
 from network_diagnostic.core.snapshot_serialization import snapshot_to_dict
 from network_diagnostic.core.exceptions import (
     CommandError, CommandExecutionError, CommandNotFoundError, CommandTimeoutError,
+    CommandUntrustedError, CommandPermissionError, CommandStartError, CommandOutputLimitError,
     DiagnosticError, ParsingError, ValidationError,
 )
 from network_diagnostic.core.models import (
@@ -287,6 +288,10 @@ def test_lookup_ip_addresses_rejects_non_sequence_input(hostnames, subprocess_ru
     (CommandTimeoutError("getent timed out after 10 seconds."), ExecutionStatus.TIMEOUT),
     (CommandNotFoundError("Required command not found: getent"), ExecutionStatus.FAILED),
     (CommandExecutionError("getent failed: exit code 3"), ExecutionStatus.FAILED),
+    (CommandUntrustedError("Refusing to run getent: world-writable"), ExecutionStatus.FAILED),
+    (CommandPermissionError("Could not execute getent: Permission denied"), ExecutionStatus.FAILED),
+    (CommandStartError("Could not execute getent: Too many open files"), ExecutionStatus.FAILED),
+    (CommandOutputLimitError("getent failed: stdout exceeded 262144 bytes"), ExecutionStatus.FAILED),
     (ParsingError("Invalid address in getent output"), ExecutionStatus.FAILED),
 ])
 def test_lookup_ip_addresses_keeps_other_results_when_one_lookup_fails(error, status, monkeypatch):
@@ -1011,6 +1016,11 @@ EXCEPTION_MAPPING = [
     (CommandTimeoutError("timed out"), S.TIMEOUT, "command_timeout"),
     (CommandExecutionError("exit 1"), S.FAILED, "command_failed"),
     (CommandError("generic"), S.FAILED, "command_failed"),
+    # Phase 14C.0: hardened runner errors keep the existing snapshot contract.
+    (CommandUntrustedError("untrusted command"), S.UNAVAILABLE, "command_unavailable"),
+    (CommandPermissionError("permission denied"), S.FAILED, "command_failed"),
+    (CommandStartError("start failed"), S.FAILED, "command_failed"),
+    (CommandOutputLimitError("output limit"), S.FAILED, "command_failed"),
     (ParsingError("bad output"), S.FAILED, "parsing_failed"),
 ]
 

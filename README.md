@@ -393,16 +393,118 @@ Privacy and output safety:
 ## Command execution
 
 Network, DNS, and ping diagnostics use the UI-independent `command_runner`.
-`run_command(arguments, allowed_codes=(0,), timeout=10)` accepts a non-empty list
-of string arguments, runs without a shell, and returns `CommandResult` with
-`arguments`, `stdout`, `stderr`, `return_code`, and `duration_seconds` measured
-with `time.monotonic()`. The environment is copied with `LC_ALL=C`, and output is
-decoded as UTF-8 with invalid bytes replaced by U+FFFD; the timeout
-must be greater than 0 and at most 60 seconds. Invalid arguments (not a non-empty
-list of strings, an empty program name, or any NUL character) and invalid timeouts
-(non-numeric, boolean, zero, negative, NaN, infinite, or above 60 seconds)
-raise `ValidationError` before `subprocess.run()` is called. Later empty arguments
-and spaces are allowed.
+`run_command(arguments, allowed_codes=(0,), timeout=10)` runs one allowed command
+without a shell and returns `CommandResult` with `arguments` (a copy of the caller's
+list), `stdout`, `stderr`, `return_code`, and `duration_seconds` measured with
+`time.monotonic()`. Output is decoded as UTF-8 with invalid bytes replaced by U+FFFD.
+
+### Execution model
+
+- **Allowlist.** `arguments[0]` must be a bare name in `COMMAND_POLICIES`: `ip`, `ss`,
+  `nmcli`, `hostname`, `ping`, `getent`, `dig`. Paths, other programs, and privilege tools
+  such as `sudo` are rejected with `ValidationError`. The tool never raises privileges.
+- **Argument grammar.** Every later argument must be a fixed token of the command's
+  policy (for example `-4`, `route`, `+stats`), a number from 1 to 999 after `-c` or `-W`
+  for ping, or the one free operand, which is checked by `validate_host` or
+  `validate_interface_name`. Values starting with `-`, `+`, or `@` are never accepted as
+  operands. Arguments may not contain control characters (including newline, tab, and
+  NUL), and there are at most 32 arguments of at most 512 characters.
+- **Timeout and exit codes.** The timeout must be greater than 0 and at most the
+  command's own maximum (10 s for `ip`, `ss`, `nmcli`, `hostname`; 15 s for `ping`,
+  `getent`, `dig`), and never above 60 s. `allowed_codes` must be a non-empty tuple of
+  integers. Invalid values raise `ValidationError` before anything is started.
+- **Trusted directories.** The command is looked up only in `/usr/bin`, `/usr/sbin`,
+  `/bin`, `/sbin`, in this order. `$PATH` is not read and `/usr/local`, `/opt`, and home
+  directories are not searched. A candidate is accepted only if its real path (symbolic
+  links resolved) is a regular, executable file owned by root and not writable by group
+  or others, and every directory above it, including the directories of each symbolic
+  link, is owned by root and not writable by group or others. If an earlier directory
+  has an untrusted file, a later trusted one is still used. The check runs before every
+  execution and nothing is cached. The command is started from its real path with the
+  caller's name as `argv[0]`.
+- **Environment.** The command gets only `PATH=/usr/bin:/usr/sbin:/bin:/sbin`,
+  `LC_ALL=C`, and `LANG=C`. The caller's environment is not copied, so `LD_PRELOAD`,
+  `HOSTALIASES`, `RES_OPTIONS`, `LOCALDOMAIN`, `HOME`, and similar variables have no
+  effect. There is no `HOME`, so `dig` cannot read `~/.digrc`; the DNS latency test also
+  passes `-r`, which stops `dig` from reading `.digrc` from any directory.
+- **Process setup.** `shell=False`, standard input is `/dev/null`, the working directory
+  is `/`, `close_fds=True`, no `preexec_fn`, and the command runs in its own session
+  (`start_new_session=True`), so it has no controlling terminal and its whole process
+  group can be stopped.
+
+### Output limits
+
+stdout and stderr are read in chunks of at most 64 KiB while the command runs, so a
+command cannot fill memory or block on a full pipe. Exactly the limit is allowed;
+one byte more stops the command with `CommandOutputLimitError`, which carries the output
+read so far (never more than the limits).
+
+| Limit | Value | Reason |
+| --- | --- | --- |
+| stdout `ip`, `ss` | 3 MiB | about 30,000 route or socket lines |
+| stdout `nmcli` | 1 MiB | terse output, one line per device |
+| stdout `ping`, `getent`, `dig` | 256 KiB | outputs are far below 64 KiB |
+| stdout `hostname` | 64 KiB | output is under 256 bytes |
+| stderr, every command | 64 KiB | diagnostic text |
+| stdout and stderr together | 4 MiB | hard memory ceiling |
+
+### Timeout and stopping
+
+The timeout covers everything after the start (reading and waiting) and uses a monotonic
+deadline. When it expires, a limit is exceeded, or the runner is interrupted
+(`KeyboardInterrupt` and other exceptions), the whole process group receives `SIGTERM`,
+and after a grace period of at most 1 second `SIGKILL`; the main process is then reaped.
+`SIGKILL` is sent as soon as the main process has exited after `SIGTERM`, so descendants
+may get less than 1 second, and it is also sent if the wait is interrupted. Pipes are
+always closed. A timeout can take up to about 1 second longer than requested. After a
+normal successful run (main process reaped, both pipes closed) no signal is sent, so the
+process ID cannot be reused by mistake. If the main process ends while a descendant still holds an output pipe open,
+the runner waits at most 0.5 seconds, stops the group, and returns the main process's
+result. A process in uninterruptible sleep that survives `SIGKILL` is reaped by a
+background thread after 5 seconds.
+
+### Errors
+
+Technical failures are `CommandError` subclasses; they are never returned as a
+`CommandResult`, so a failed measurement is not read as a network result. `CommandError`
+keeps `arguments`, `reason`, `return_code` when available, `stdout`, `stderr`, and
+`timeout`. Original exceptions are chained. The message of a failed command, and
+`reason`, contain the first non-empty stderr line with non-printable characters
+(control and bidirectional characters) replaced by escapes such as `\x1b`, cut to 200
+characters with a trailing `...`, or `exit code N` when stderr is empty. The full
+(bounded) stderr stays in `CommandError.stderr`.
+
+| Exception | Parent | Cause | Snapshot status |
+| --- | --- | --- | --- |
+| `ValidationError` | `DiagnosticError` | Rejected before any command started (unknown command, argument, timeout, `allowed_codes`) | not caught: programming error |
+| `CommandNotFoundError` | `CommandError` | Not found in any trusted directory | `UNAVAILABLE`, `command_unavailable` |
+| `CommandUntrustedError` | `CommandNotFoundError` | Found, but every candidate fails the owner, mode, or type checks | `UNAVAILABLE`, `command_unavailable` |
+| `CommandTimeoutError` | `CommandError` | Timeout; process group stopped | `TIMEOUT`, `command_timeout` |
+| `CommandExecutionError` | `CommandError` | Exit code not in `allowed_codes` (also death by signal) | `FAILED`, `command_failed` |
+| `CommandPermissionError` | `CommandExecutionError` | Not executable by the current user | `FAILED`, `command_failed` |
+| `CommandStartError` | `CommandExecutionError` | Other `OSError` or `SubprocessError` at start (for example too many open files) | `FAILED`, `command_failed` |
+| `CommandOutputLimitError` | `CommandExecutionError` | An output limit was exceeded; process group stopped | `FAILED`, `command_failed` |
+
+`CommandError.arguments`, `stdout`, `stderr`, and `reason` can contain sensitive data
+(host names, addresses, command output). Do not write them to logs or serialize them;
+the diagnostic snapshot does not.
+
+### Residual risks
+
+- Time of check to time of use: the file is checked and then started a few milliseconds
+  later. Replacing it in that window needs root, and then an attacker can do more
+  directly. File system ACLs and mount options are not checked.
+- Only files owned by uid 0 are trusted, and this is not configurable. In a user
+  namespace or rootless container, system files can appear as owned by `nobody`; every
+  command is then refused with `CommandUntrustedError` and reported as `UNAVAILABLE`.
+- Commands installed only in `/usr/local` or `/opt` are not found.
+- A descendant that creates its own session (`setsid`) or daemonizes escapes the process
+  group stop. A descendant that closes both output pipes and stays in the group survives a
+  successful run, because no signal is sent after a normal exit.
+- When the main process has ended but a descendant keeps a pipe open, the group is
+  signalled after the main process was reaped. If its group is empty and the process ID is
+  reused within milliseconds, the signal could in theory reach an unrelated process group.
+- Linux and other POSIX systems only (`killpg`, `start_new_session`).
 
 ## Input validation
 
@@ -415,7 +517,7 @@ raise `ValidationError(DiagnosticError)` otherwise. They never modify the value.
 | `validate_host(value)` | IPv4 and IPv6 literals and ASCII hostnames (labels of 1-63 letters, digits, and inner hyphens; at most 253 characters, plus one optional trailing dot). Single-label names and punycode are allowed. |
 | `validate_ipv4_address(value)` | Four-part dotted-decimal IPv4 addresses without leading zeros. |
 | `validate_interface_name(value)` | 1-15 ASCII letters, digits, `_`, `.`, or `-`; not starting with `-` and not `.` or `..`. |
-| `validate_command_arguments(arguments)` | A non-empty list of strings with a non-empty program name and no NUL characters. |
+| `validate_command_arguments(arguments)` | A non-empty list of at most 32 strings of at most 512 characters, with a non-empty program name and no control characters (including NUL). |
 | `validate_timeout(timeout)` | An `int` or `float` (not `bool`) greater than 0 and at most `MAX_TIMEOUT_SECONDS` (60). |
 
 `validate_host` rejects empty values, whitespace and control characters, URIs,
@@ -438,15 +540,12 @@ that the route parser has validated. Command output is validated by `parsers.py`
 
 The interface name rule is conservative: Linux allows some longer-looking or
 non-ASCII names that are rejected here. The 60-second maximum is a general upper
-bound that keeps timeouts within what `subprocess` can handle; the per-command
-timeouts described above (10 seconds) still apply.
+bound; each command has a lower maximum timeout (see [Command execution](#command-execution)),
+and the callers use 10 seconds.
 
-Technical failures raise `CommandNotFoundError`, `CommandTimeoutError`, or
-`CommandExecutionError`, all derived from `CommandError` and `DiagnosticError`.
-They retain command arguments, the reason, the return code when available,
-stdout, stderr, and the configured timeout. Timeout output, including partial
-byte output, is preserved as text. Original execution exceptions are chained.
-The runner does not print, prompt, analyze diagnostics, or import UI modules.
+Technical failures raise `CommandError` subclasses, described in
+[Command execution](#command-execution). The runner does not print, prompt, analyze
+diagnostics, or import UI modules.
 
 Ping accepts return codes 0 and 1 for diagnostic interpretation. Code 2 and other
 unexpected codes are technical failures even when stdout contains output. Getent

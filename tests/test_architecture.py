@@ -1,5 +1,6 @@
 import ast
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,17 @@ def fresh_package_modules():
             del sys.modules[name]
 
 
+def use_shared_seam(runner_module, seam):
+    """Give a freshly imported command_runner the guarded seams that conftest.py gave the original.
+
+    conftest.py patches the module object imported at collection time. A module
+    imported again inside patch.dict(sys.modules) is a new object and would
+    resolve and start real commands without this.
+    """
+    runner_module._run_bounded = seam
+    runner_module._resolve_executable = lambda name: f"/usr/bin/{name}"
+
+
 def block_ui_modules():
     for name in UI_MODULES:
         sys.modules[name] = None
@@ -104,6 +116,7 @@ def test_engine_imports_and_ping_diagnostic_work_without_ui_modules(
         sys.modules[SERVICE] = None
 
         modules = {name: importlib.import_module(f"{CORE}.{name}") for name in ENGINE_NAMES}
+        use_shared_seam(modules["command_runner"], subprocess_run)
 
         subprocess_run.assert_not_called()
         system_command.assert_not_called()
@@ -162,6 +175,7 @@ def test_engine_rejects_invalid_input_without_commands_output_or_ui_modules(
         sys.modules[SERVICE] = None
 
         modules = {name: importlib.import_module(f"{CORE}.{name}") for name in ENGINE_NAMES}
+        use_shared_seam(modules["command_runner"], subprocess_run)
         validation_error = modules["exceptions"].ValidationError
 
         assert issubclass(validation_error, modules["exceptions"].DiagnosticError)
@@ -230,6 +244,113 @@ def test_service_layer_does_not_print_prompt_or_run_processes():
     assert not {"print", "input", "exec", "eval"} & names
     assert not {"run", "Popen", "system", "check_output"} & attributes
     assert not any(isinstance(node, ast.Global) for node in ast.walk(tree))
+
+
+RUNNER = f"{CORE}.command_runner"
+FORBIDDEN_PROCESS_CALLS = {
+    "os": {"system", "popen", "execv", "execve", "execvp", "execl", "execlp", "spawnv", "spawnl", "fork", "posix_spawn"},
+    "subprocess": {"run", "call", "check_call", "check_output", "getoutput", "getstatusoutput"},
+}
+
+
+def calls(module_name):
+    tree = ast.parse(package_modules()[module_name].read_text(encoding="utf-8"))
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+
+def attribute_path(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def test_only_the_command_runner_imports_subprocess():
+    for name in package_modules():
+        imported = imported_modules(name)
+        if name == RUNNER:
+            assert "subprocess" in imported
+        else:
+            assert "subprocess" not in imported, f"{name} imports subprocess"
+
+
+@pytest.mark.parametrize("name", [module for module in package_modules() if module.startswith(CORE)])
+def test_core_sources_start_processes_only_through_the_hardened_runner(name):
+    for call in calls(name):
+        assert attribute_path(call.func) not in {
+            f"{module}.{function}" for module, functions in FORBIDDEN_PROCESS_CALLS.items() for function in functions
+        }, f"{name} line {call.lineno} starts a process outside the runner"
+        for keyword in call.keywords:
+            assert not (
+                keyword.arg == "shell" and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
+            ), f"{name} line {call.lineno} does not hardcode shell=False"
+    if name != RUNNER:
+        assert not [call for call in calls(name) if attribute_path(call.func).endswith("Popen")]
+
+
+def test_runner_starts_one_process_with_fixed_safe_options():
+    popen_calls = [call for call in calls(RUNNER) if attribute_path(call.func) == "subprocess.Popen"]
+
+    assert len(popen_calls) == 1
+    options = {keyword.arg: keyword.value for keyword in popen_calls[0].keywords}
+    assert "preexec_fn" not in options
+    assert None not in options, "Popen options must not be passed through **kwargs"
+    for name, expected in {
+        "shell": False, "close_fds": True, "start_new_session": True, "cwd": "/", "bufsize": 0,
+    }.items():
+        assert isinstance(options[name], ast.Constant) and options[name].value == expected, name
+    assert attribute_path(options["stdin"]) == "subprocess.DEVNULL"
+    assert attribute_path(options["stdout"]) == "subprocess.PIPE"
+    assert attribute_path(options["stderr"]) == "subprocess.PIPE"
+    assert "env" in options and "executable" in options
+    assert not [call for call in popen_calls[0].args if isinstance(call, ast.Starred)]
+
+
+def test_trusted_resolution_is_called_only_from_the_default_resolver():
+    tree = ast.parse(package_modules()[RUNNER].read_text(encoding="utf-8"))
+    callers = set()
+    for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]:
+        if any(
+            isinstance(node, ast.Call) and attribute_path(node.func) == "resolve_trusted_executable"
+            for node in ast.walk(function)
+        ):
+            callers.add(function.name)
+
+    assert callers == {"_resolve_executable"}
+    for name in package_modules():
+        if name != RUNNER:
+            assert "resolve_trusted_executable" not in package_modules()[name].read_text(encoding="utf-8")
+
+
+def test_freshly_imported_runner_cannot_start_real_processes_or_signal_groups(subprocess_run):
+    # Meta test for use_shared_seam: without it, a re-imported command_runner would
+    # resolve real files (on a root-owned system) and start real commands.
+    with patch.dict(sys.modules):
+        fresh_package_modules()
+        runner = importlib.import_module(RUNNER)
+
+        assert runner._run_bounded is not subprocess_run
+        use_shared_seam(runner, subprocess_run)
+
+        assert runner._run_bounded is subprocess_run
+        assert runner._resolve_executable("ping") == "/usr/bin/ping"
+        with pytest.raises(AssertionError, match="forbidden"):
+            runner.run_command(["hostname"])
+        with pytest.raises(AssertionError, match="Real processes are forbidden"):
+            runner.subprocess.Popen(["hostname"])
+        with pytest.raises(AssertionError, match="forbidden"):
+            runner.os.killpg(os.getpgrp(), 0)
+        subprocess_run.assert_called_once()
+
+
+def test_runner_never_reads_the_process_environment_or_current_directory():
+    tree = ast.parse(package_modules()[RUNNER].read_text(encoding="utf-8"))
+    attributes = {attribute_path(node) for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+    assert not {"os.environ", "os.getenv", "os.getcwd", "os.putenv"} & attributes
 
 
 @pytest.mark.parametrize("name", [CORE] + ENGINE_MODULES)
@@ -310,6 +431,7 @@ def test_service_layer_import_runs_no_commands_and_works_without_ui_modules(
         block_ui_modules()
 
         service = importlib.import_module(SERVICE)
+        use_shared_seam(sys.modules[f"{CORE}.command_runner"], subprocess_run)
 
         subprocess_run.assert_not_called()
         captured = capsys.readouterr()

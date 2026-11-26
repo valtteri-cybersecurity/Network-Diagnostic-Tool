@@ -5,9 +5,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from network_diagnostic.core.exceptions import CommandError, CommandExecutionError, DiagnosticError, ValidationError
+from network_diagnostic.core.exceptions import (
+    CommandError, CommandExecutionError, DiagnosticError, ValidationError,
+    CommandUntrustedError, CommandPermissionError, CommandStartError, CommandOutputLimitError,
+)
 from network_diagnostic.core.models import CommandResult, ExecutionStatus, PacketLossStatus, PingResult
-from network_diagnostic.core import ping
+from network_diagnostic.core import command_runner, ping
 
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "ping"
@@ -25,10 +28,14 @@ def test_run_ping_uses_expected_arguments_and_c_locale(monkeypatch, subprocess_r
     assert isinstance(result, CommandResult)
     assert result.stdout == output
     assert result.return_code == 0
+    # Changed in Phase 14C.0: the seam is _run_bounded, the environment is the
+    # fixed allowlist (not a copy of os.environ) and the executable is resolved.
+    policy = command_runner.COMMAND_POLICIES["ping"]
     subprocess_run.assert_called_once_with(
-        ["ping", "-n", "-c", "3", "-W", "2", "example.com"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=False, shell=False,
-        env={**original_environment, "LC_ALL": "C"},
+        ["ping", "-n", "-c", "3", "-W", "2", "example.com"], executable="/usr/bin/ping", timeout=10,
+        env={"PATH": "/usr/bin:/usr/sbin:/bin:/sbin", "LC_ALL": "C", "LANG": "C"},
+        max_stdout_bytes=policy.max_stdout_bytes, max_stderr_bytes=command_runner.MAX_STDERR_BYTES,
+        max_total_bytes=command_runner.MAX_TOTAL_OUTPUT_BYTES,
     )
     assert dict(os.environ) == original_environment
 
@@ -633,3 +640,20 @@ def test_ping_gateway_reports_multipath_route_as_unsupported_instead_of_missing_
     )
     assert result.reachable is None
     subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [
+    CommandUntrustedError("Refusing to run ping: world-writable"),
+    CommandPermissionError("Could not execute ping: Permission denied"),
+    CommandStartError("Could not execute ping: Too many open files"),
+    CommandOutputLimitError("ping failed: stdout exceeded 262144 bytes", stdout="partial"),
+])
+def test_ping_target_reports_hardened_runner_errors_as_failed_results(error, subprocess_run):
+    subprocess_run.side_effect = error
+
+    result = ping.ping_target("internet")
+
+    assert result.execution_status is ExecutionStatus.FAILED
+    assert result.error == str(error)
+    assert result.raw_output == error.stdout
+    assert result.reachable is None

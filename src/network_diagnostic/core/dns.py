@@ -55,11 +55,12 @@ def dns_query(site: str) -> DnsQueryResult:
 
 def dns_latency(site: str) -> DnsLatencyResult:
     validate_host(site)
-    # -q makes dig treat valid single-label names such as IN or A as the query name.
+    # -r stops dig from reading a .digrc file. -q makes dig treat valid
+    # single-label names such as IN or A as the query name.
     # Exit code 9 means that no DNS server replied. It is a measurement result,
     # not a failure of dig itself, so the name's resolution remains unknown.
     result = run_command(
-        ["dig", "+time=3", "+tries=1", "+stats", "-q", site],
+        ["dig", "-r", "+time=3", "+tries=1", "+stats", "-q", site],
         allowed_codes=(0, DIG_NO_REPLY),
     )
 

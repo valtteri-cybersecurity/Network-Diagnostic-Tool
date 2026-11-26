@@ -189,7 +189,7 @@ def test_dns_latency_parses_response_and_uses_bounded_dig_query(
         execution_status=ExecutionStatus.COMPLETED,
         answer_count=2 if status == "NOERROR" else 0,
     )
-    command.assert_called_once_with(["dig", "+time=3", "+tries=1", "+stats", "-q", site], allowed_codes=(0, 9))
+    command.assert_called_once_with(["dig", "-r", "+time=3", "+tries=1", "+stats", "-q", site], allowed_codes=(0, 9))
 
 
 @pytest.mark.parametrize("old_text, new_text, status, latency, answers, resolved", [
@@ -362,7 +362,7 @@ def test_dns_latency_integrates_shared_runner(
         answer_count=2 if status == "NOERROR" else 0,
     )
     subprocess_run.assert_called_once()
-    assert subprocess_run.call_args.args[0] == ["dig", "+time=3", "+tries=1", "+stats", "-q", "example.com"]
+    assert subprocess_run.call_args.args[0] == ["dig", "-r", "+time=3", "+tries=1", "+stats", "-q", "example.com"]
     assert subprocess_run.call_args.kwargs["timeout"] == 10
 
 
@@ -392,7 +392,7 @@ def test_dns_latency_passes_valid_single_label_and_literal_names_as_query_name(s
     assert result.hostname == site
     assert result.execution_status is ExecutionStatus.COMPLETED
     subprocess_run.assert_called_once()
-    assert subprocess_run.call_args.args[0] == ["dig", "+time=3", "+tries=1", "+stats", "-q", site]
+    assert subprocess_run.call_args.args[0] == ["dig", "-r", "+time=3", "+tries=1", "+stats", "-q", site]
 
 
 @pytest.mark.parametrize("site", ["IN", "localhost", "example.com."])

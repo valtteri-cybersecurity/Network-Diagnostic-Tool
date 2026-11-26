@@ -250,7 +250,9 @@ def test_network_collectors_integrate_shared_runner(function, arguments, fixture
     subprocess_run.assert_called_once()
     assert subprocess_run.call_args.args == (arguments,)
     assert subprocess_run.call_args.kwargs["timeout"] == 10
-    assert subprocess_run.call_args.kwargs["shell"] is False
+    # Changed in Phase 14C.0: shell is no longer a parameter (the runner hardcodes shell=False).
+    assert "shell" not in subprocess_run.call_args.kwargs
+    assert subprocess_run.call_args.kwargs["executable"] == f"/usr/bin/{arguments[0]}"
     assert subprocess_run.call_args.kwargs["env"]["LC_ALL"] == "C"
 
 

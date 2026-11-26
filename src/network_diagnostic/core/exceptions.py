@@ -38,3 +38,22 @@ class CommandTimeoutError(CommandError):
 
 class CommandExecutionError(CommandError):
     pass
+
+
+class CommandUntrustedError(CommandNotFoundError):
+    """The command exists, but no candidate passed the trusted-location checks.
+
+    Subclass of CommandNotFoundError so that it is reported as unavailable.
+    """
+
+
+class CommandPermissionError(CommandExecutionError):
+    """The command could not be executed because of missing permission."""
+
+
+class CommandStartError(CommandExecutionError):
+    """The command could not be started for a reason other than a missing file or permission."""
+
+
+class CommandOutputLimitError(CommandExecutionError):
+    """The command produced more output than the runner allows; its process group was stopped."""

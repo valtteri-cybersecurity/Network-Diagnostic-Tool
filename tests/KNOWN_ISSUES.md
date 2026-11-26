@@ -266,8 +266,8 @@ Vaiheen 13 rajaukset:
   lisääminen on julkisen tietomallin muutos.
 - `output.clear_screen()` käyttää `os.system("clear")`. Komento on vakio eikä sisällä
   syötettä; muutosta ei tehty.
-- Command Runner lukee koko tulosteen muistiin. Käytettyjen komentojen tulosteet ovat pieniä,
-  joten kokorajoitusta ei toteutettu.
+- Command Runnerin tulosteen kokorajoitus on toteutettu vaiheessa 14C.0 (ks. "Vaiheen 14C.0
+  rajaukset").
 - Palvelufunktioita ei voi keskeyttää kesken komennon. Pahin kesto nykyisillä
   aikakatkaisuilla: `lookup_ip_addresses()` 80 s (oletusnimet), `get_routing_snapshot()`
   30 s, gateway-ping 20 s, muut 10 s. Keskeytys on suunniteltu vaiheeseen 24
@@ -306,10 +306,57 @@ Vaiheen 14 rajaukset (Diagnostic Snapshot ja sarjoitus):
   ei ole manipulaatiolta suojattu todistusaineisto.
 - Gateway-ping lukee reititystaulun uudelleen, joten se voi kuvata eri hetken kuin
   reititysosio.
-- Command Runner kopioi koko ympäristön, myös `PATH`-muuttujan, eikä rajaa tulosteen
-  muistinkulutusta. Command Runnerin resurssirajat, turvallinen ohjelmien resoluutio
-  (kiinteä `PATH`) ja kokonaiskeräyksen aikaraja on käsiteltävä ennen hallittujen
-  korjaustoimintojen käyttöönottoa (vaiheet 17–21).
+- Command Runnerin ympäristön, `PATH`-haun ja tulosteen rajaus on ratkaistu vaiheessa 14C.0
+  (ks. "Vaiheen 14C.0 rajaukset"). Kokonaiskeräyksen aikaraja on edelleen käsiteltävä ennen
+  hallittujen korjaustoimintojen käyttöönottoa (vaiheet 17–21).
+
+Vaiheen 14C.0 rajaukset (Command Runner Security Hardening):
+
+- Resoluutio tarkistaa tiedoston ja hakemistoketjun (`stat`) ennen suoritusta, mutta
+  tarkistuksen ja `exec`-kutsun välillä on millisekunnin mittainen TOCTOU-ikkuna. Vaihto
+  ikkunassa vaatii root-oikeudet. Lisäksi tiedostojärjestelmän ACL:t, mount-asetukset ja
+  file capabilities eivät näy `stat`-tilassa. Jäännösriski on hyväksytty; `fexecve` ei sovi
+  argv[0]-/multi-call-käyttöön.
+- Vain uid 0 omistamat tiedostot ja hakemistot hyväksytään (`TRUSTED_OWNER_UIDS = (0,)`).
+  User namespace -ympäristössä, rootless-kontissa ja tässä kehityssandboxissa järjestelmän
+  tiedostot näkyvät omistajana `nobody` (uid 65534), jolloin jokainen komento hylätään
+  (`CommandUntrustedError`, snapshotissa UNAVAILABLE / `command_unavailable`). Aidot
+  komentoajot eivät siksi onnistu näissä ympäristöissä; testit ovat mockattuja, ja
+  oikean järjestelmän resoluutiotestit ohitetaan, kun `/usr/bin` ei ole uid 0 -omisteinen.
+- Luotetut hakemistot ovat `/usr/bin`, `/usr/sbin`, `/bin` ja `/sbin`. `/usr/local/*`, `/opt`
+  ja `$HOME` on jätetty pois, joten ylläpitäjän asentamaa `ping`- tai `ip`-komentoa ei
+  löydy. Jakelukohtainen polkuvalinta kuuluu alustakerrokseen (14C.2).
+- Aikakatkaisun pahin kokonaisaika on `timeout` + 1 s (`TERMINATE_GRACE_SECONDS`) ja
+  `select`-aikaviipaleen enintään noin 0,2 s viive. Kuolemattoman (D-tilan) prosessin reapaus
+  siirretään taustasäikeelle 5 s jälkeen. Kumulatiivinen aikabudjetti kasvaa
+  aikakatkaisujen määrän verran sekunnilla (vaiheen 14 arvio ei ole taattu yläraja).
+- Aikakatkaisu, rajan ylitys ja keskeytys lopettavat komennon prosessiryhmän. Jälkeläinen,
+  joka kutsuu `setsid`-funktiota tai vaihtaa ryhmää, pakenee ryhmän lopetuksesta. Lisäksi
+  `killpg` voi teoriassa osua uudelleenkäytettyyn pid-arvoon, jos ryhmä on tyhjä ja pid
+  ehditään antaa uudelleen millisekunneissa. Normaalissa onnistumisessa (pääprosessi päättynyt
+  ja molemmat putket suljettu) ryhmälle ei lähetetä signaalia, joten jälkeläinen, joka on
+  sulkenut putkensa ja jatkaa ryhmässä, jää eloon. Nykyiset komennot eivät tee näin.
+- Rajan ylitys (stdout-, stderr- tai yhteisraja) on tekninen virhe (`CommandOutputLimitError`),
+  ei mittaustulos. Poikkeuksen `stdout`/`stderr` voivat sisältää arkaluonteista dataa
+  (rajattuna), eikä niitä saa lokittaa tai sarjoittaa.
+- `cli/output.py`:n `os.system("clear")` on edelleen Command Runnerin ulkopuolella eikä
+  käytä sen allowlistiä, ympäristöä tai rajoja. Komento on vakio eikä sisällä syötettä;
+  muutosta ei tehty.
+- Uusille poikkeuksille ei ole omia snapshot-`IssueCode`-arvoja. `CommandPermissionError`,
+  `CommandStartError` ja `CommandOutputLimitError` näkyvät koodina `command_failed` ja
+  `CommandUntrustedError` koodina `command_unavailable`, joten syy (käyttöoikeus, käynnistysvirhe,
+  liian suuri tuloste, epäluotettava polku) katoaa. Ehdotus vaiheisiin 14C.1/14D (additiivinen
+  muutos): `command_permission_denied`, `command_untrusted`, `command_output_too_large`,
+  `command_start_failed` ja tarvittaessa `CollectionStatus`-täsmennys.
+- Komentokohtainen argumenttikielioppi on suljettu: uusi komento, lippu tai alikomento vaatii
+  `COMMAND_POLICIES`-muutoksen, testin ja Tech Leadin hyväksynnän. `dig` hyväksyy hostin vain
+  `-q`-lipun arvona.
+- `dig -r` (ei `~/.digrc`) on pakollinen `dns_latency()`-kutsussa; runner ei pakota sitä, vaan
+  kutsujan testi (`test_dns.py`). Tuki on tarkistettu paikallisesti (`dig -h`), BIND 9.16–9.20
+  päätelty versionumerosta, ei ajettu.
+- Testaamatta: dig `.digrc`-lukeminen (T12) vaatii verkon eikä kuulu verkottomaan
+  testiajoon; D-tilan prosessin reaper-säie testataan vain mock-tasolla. Popenin `FileNotFoundError`
+  tulkitaan aina puuttuvaksi komennoksi (`CommandNotFoundError`), koska `cwd` on aina `/`.
 
 Suunnitellut käsittelyvaiheet (roadmap `docs/plans/project-roadmap.md`, paikallinen):
 
@@ -320,6 +367,8 @@ Suunnitellut käsittelyvaiheet (roadmap `docs/plans/project-roadmap.md`, paikall
 | getent-tulosten tulkinnan epävarmuus | 16 |
 | Socket-osoitteiden luokittelu | 16 |
 | Palvelukutsujen keskeyttäminen | 24 |
+| Snapshot-IssueCodet Command Runnerin uusille virheluokille | 14C.1 / 14D |
+| Jakelukohtaiset luotetut hakemistot ja `/usr/local` | 14C.2 |
 | Snapshot-tekstin Unicode-ohjausmerkkien escapointi ennen renderöintiä | 22 |
 | Python 3.11-, 3.13- ja 3.14-yhteensopivuustestaus | CI (vaihe 13.2); Docker-testaus erikseen |
 
