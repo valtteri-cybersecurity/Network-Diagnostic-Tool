@@ -149,6 +149,11 @@ def display_ping_report(result: PingResult) -> None:
     }
     if result.error is not None:
         reason = result.error
+    elif result.packet_loss_status is PacketLossStatus.TOTAL_LOSS and result.icmp_errors:
+        reason = (
+            f"No replies were received, but {result.icmp_errors} ICMP error messages were "
+            "reported (for example, destination unreachable)."
+        )
     elif result.packet_loss_status is PacketLossStatus.PARTIAL_LOSS:
         reason = (
             f"{result.packet_loss_percent:g}% of test packets were lost. "
@@ -164,7 +169,8 @@ def display_ping_report(result: PingResult) -> None:
     fields = (
         ("status", result.execution_status.value), ("reason", reason),
         ("sent", result.packets_sent), ("received", result.packets_received),
-        ("loss", result.packet_loss_percent), ("min", result.min_rtt_ms),
+        ("loss", result.packet_loss_percent), ("icmp errors", result.icmp_errors),
+        ("min", result.min_rtt_ms),
         ("avg", result.avg_rtt_ms), ("max", result.max_rtt_ms),
         ("mdev", result.mdev_ms), ("reachable", result.reachable),
     )

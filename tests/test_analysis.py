@@ -73,8 +73,9 @@ def test_analyze_open_ports_skips_unconvertible_or_missing_ports(row):
     ]
 
 
-@pytest.mark.parametrize("protocol", ["TCP", "UDP", "sctp", ""])
-def test_analyze_open_ports_preserves_protocol_and_uses_port_only(protocol):
+# UDP is excluded because SSH is TCP only (see the phase 10 protocol test below).
+@pytest.mark.parametrize("protocol", ["TCP", "sctp", ""])
+def test_analyze_open_ports_preserves_protocol_and_names_service_by_port(protocol):
     rows = [ListeningSocket(protocol=protocol, local_port="22")]
 
     result = analysis.analyze_open_ports(rows)
@@ -311,3 +312,21 @@ def test_latency_classifiers_reject_negative_or_non_finite_measurements(value):
 def test_analyze_jitter_rejects_reversed_negative_or_non_finite_measurements(minimum, maximum, message):
     with pytest.raises(ValueError, match=message):
         analysis.analyze_jitter(minimum, maximum)
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+@pytest.mark.parametrize("protocol, port, expected", [
+    ("TCP", "68", "UNKNOWN"), ("UDP", "68", "DHCP client"),
+    ("UDP", "22", "UNKNOWN"), ("TCP", "22", "SSH"),
+    ("TCP", "51820", "UNKNOWN"), ("UDP", "445", "UNKNOWN"),
+    ("TCP", "53", "Domain Name System (DNS)"), ("UDP", "53", "Domain Name System (DNS)"),
+    ("UDP", "443", "HTTPS"), (None, "68", "DHCP client"),
+])
+def test_analyze_open_ports_names_single_protocol_services_only_for_their_protocol(protocol, port, expected):
+    sockets = [ListeningSocket(protocol=protocol, state="LISTEN", local_address="0.0.0.0", local_port=port)]
+
+    result = analysis.analyze_open_ports(sockets)
+
+    assert result[0].service_name == expected

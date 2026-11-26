@@ -28,6 +28,11 @@ def get_listening_sockets():
     return result.stdout.strip().splitlines()
 
 
+# NetworkManager device states that mean the device has an active connection.
+# "connected (externally)" is a connection that NetworkManager did not create.
+CONNECTED_STATES = ("connected", "connected (externally)")
+
+
 def get_network_plugin():
     result = run_command(
         [
@@ -43,7 +48,7 @@ def get_network_plugin():
     )
 
     for interface, state in parse_nmcli_states(result.stdout):
-        if interface != "lo" and state == "connected":
+        if interface != "lo" and state in CONNECTED_STATES:
             return True
 
     return False

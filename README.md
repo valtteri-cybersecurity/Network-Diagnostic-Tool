@@ -54,7 +54,7 @@ The current version uses predefined targets. To change them, edit the target def
 
 ## Error handling
 
-Network and DNS commands have a 10-second execution limit. Ping also has a 10-second limit. DNS queries made with dig use a three-second query timeout and one attempt, within the overall execution limit.
+Network and DNS commands have a 10-second execution limit. Ping also has a 10-second limit; it waits at most two seconds for a reply when none has arrived (`-W 2`), so complete packet loss is reported as a completed measurement instead of a timeout. DNS queries made with dig use a three-second query timeout and one attempt, within the overall execution limit. When no DNS server replies (dig exit code 9), the DNS latency test returns a `timeout` result (`failed` for other no-reply cases such as a refused connection) with the error `No reply from DNS server`.
 
 Missing commands, command failures, and timeouts are reported to the user. Network and DNS execution errors return to the main menu. If NetworkManager status is unavailable, the main menu remains accessible.
 
@@ -179,6 +179,8 @@ access, and type hints do not perform runtime validation.
   `reachable=True` means at least one reply was observed; `False` means a
   completed measurement received no replies; `None` means reachability is unknown.
   Complete packet loss is a completed measurement with 100% loss and no RTT data.
+  `icmp_errors` holds ping's `+N errors` count (ICMP errors such as destination
+  unreachable); it is `None` when ping reported no error count.
 - `DnsQueryResult` describes system name resolution, `DnsLatencyResult` describes
   a DNS response and its timing, and `DnsAddressResult` holds separate IPv4/IPv6
   lists. An unsuccessful name lookup or empty address list can be a completed
@@ -187,7 +189,9 @@ access, and type hints do not perform runtime validation.
   result stays `None` instead of becoming a negative answer.
 - `ListeningSocket`, `SocketCounts`, `ServiceInfo`, and `NetworkInterface` replace
   socket/interface dictionaries. Socket endpoint ports remain text so wildcard
-  values such as `*` are preserved. Service names remain port-based suggestions.
+  values such as `*` are preserved. Service names remain port-based suggestions;
+  a service that uses only UDP or only TCP (for example DHCP or SSH) is not
+  suggested for the other protocol.
 - `LatencyAnalysis` retains the DNS latency classification's existing measurement
   and status together. Analysis remains in `analysis.py`, outside the data models.
 
@@ -231,7 +235,11 @@ while a known DNS response code can be completed even when timing or answer-coun
 information is unavailable.
 
 Routing remains based on the current text output from `ip`; no route model is
-introduced, and the default route selection is unchanged.
+introduced. `parsers.select_default_route()` selects the single IPv4 default route
+the kernel prefers (lowest metric, missing metric = 0, first route on a tie). The
+interface, IPv4 address, and gateway are all read from that route. Gateway ping
+reports separately when there is no IPv4 default route and when the default route
+has no gateway (for example, a point-to-point link).
 
 ## Output parsing
 
@@ -254,13 +262,14 @@ A failed parse carries no partial measurement values; ping keeps the raw output.
 
 | Parser | Validation |
 | --- | --- |
-| `parse_ping_statistics(output, target)` | Packet counts are ASCII integers, at least one packet was sent, and received ≤ sent. Loss is 0-100% and within one percentage point of the counts (this covers iputils `%g`, macOS `%.1f`, and BusyBox integer rounding). RTT values are non-negative decimals (no NaN, infinity, or exponent) with min ≤ avg ≤ max. Duplicate replies (`+N duplicates`) are not counted as received. Complete loss without an RTT line is a completed measurement with `None` RTT values; an RTT line without received packets, received packets without an RTT line, or repeated statistics lines are errors. Four RTT values are required. |
+| `parse_ping_statistics(output, target)` | Packet counts are ASCII integers, at least one packet was sent, and received ≤ sent. Loss is 0-100% and within one percentage point of the counts (this covers iputils `%g`, macOS `%.1f`, and BusyBox integer rounding). RTT values are non-negative decimals (no NaN, infinity, or exponent) with min ≤ avg ≤ max. Duplicate replies (`+N duplicates`) are not counted as received. An `+N errors` count must be an integer and is returned as `icmp_errors`. Complete loss without an RTT line is a completed measurement with `None` RTT values; an RTT line without received packets, received packets without an RTT line, or repeated statistics lines are errors. Four RTT values are required. |
 | `parse_getent_hosts(output)` | Every address must be a valid IPv4 or IPv6 address; returns the first one or `None`. |
-| `parse_getent_addresses(output, version)` | Returns unique addresses of one version; invalid and other-version lines are skipped. |
+| `parse_getent_addresses(output, version)` | Returns unique addresses of one version; invalid and other-version lines are skipped. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, returned by `getent ahostsv6` for IPv4-only names) are not IPv6 addresses and are skipped. |
 | `parse_dig_output(output, hostname)` | Requires a response code (`[A-Z][A-Z0-9]*`); the answer count is an integer and the query time a non-negative decimal in `msec`. A present but invalid value or conflicting repeated values are errors; an absent value is `None`. The response code and the query time stay separate. |
-| `parse_ss_output(lines)` | Ports are `*` or 0-65535; addresses are `*`, IPv4, or IPv6, optionally with a `%interface` scope inside or after the brackets. Lines that do not match are skipped. |
+| `parse_ss_output(lines)` | Ports are `*` or 0-65535; addresses are `*`, IPv4, or IPv6, optionally with a `%interface` scope inside or after the brackets. Empty lines and a `Netid` header are skipped; any other line that does not match raises `ParsingError`, so a partial socket list is never shown as complete. |
 | `parse_nmcli_output(lines)`, `parse_nmcli_states(output)` | Lines with a wrong field count or an empty device or state are skipped. |
-| `parse_default_gateway()`, `parse_default_source()`, `parse_default_interface()` | The `via` and `src` values must be IPv4 addresses and `dev` a valid interface name (phase 8 validators). |
+| `select_default_route(route_lines)` | Returns the fields of the default route with the lowest metric (missing = 0; first on a tie), or `None`. Incomplete lines that end with `via`, `dev`, `src`, or `metric` are skipped. A metric must be an integer 0-4294967295. |
+| `parse_default_gateway()`, `parse_default_source()`, `parse_default_interface()` | Read from the route chosen by `select_default_route()`. The `via` and `src` values must be IPv4 addresses and `dev` a valid interface name (phase 8 validators). |
 | `parse_interface_ipv4_address(output)` | The first `inet` address must be a valid IPv4 address. |
 | `parse_port(text)` | A decimal string in the range 0-65535. |
 
@@ -281,8 +290,8 @@ DNS server information is not part of the current functionality and is not parse
 - DNS latency measures one query to the configured resolver. Caching affects the result. The default dig lookup requests an A record.
 - Socket counts count rows, not unique port numbers. One port may appear on several addresses.
 - Service names are port-based suggestions. They do not identify the actual application or prove external accessibility.
-- The routing overview uses the first default IPv4 route. VPNs, multiple default routes, and policy routing may require more detailed investigation.
-- NetworkManager's connected state does not prove internet access.
+- The routing overview uses the IPv4 default route with the lowest metric in the main routing table. Policy routing, multipath (`nexthop`) default routes, and `linkdown`/`dead` route flags are not evaluated.
+- NetworkManager's `connected` and `connected (externally)` states do not prove internet access.
 
 ## Testing
 

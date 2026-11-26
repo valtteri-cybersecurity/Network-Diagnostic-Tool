@@ -43,6 +43,9 @@ class PingResult:
     packet_loss_status: PacketLossStatus = PacketLossStatus.UNAVAILABLE
     latency_analysis: Optional[str] = None
     rtt_range_analysis: Optional[str] = None
+    # ICMP error messages such as "Destination Host Unreachable" (`+N errors`).
+    # None means that ping did not report an error count.
+    icmp_errors: Optional[int] = None
 
 
 @dataclass

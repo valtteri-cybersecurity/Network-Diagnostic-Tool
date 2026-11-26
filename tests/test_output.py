@@ -187,7 +187,7 @@ def test_display_ping_report_formats_successful_measurement_units(capsys):
     assert "INTERNET PING REPORT" in text
     assert fields == {
         "status": "completed", "reason": "All test packets were received.",
-        "sent": "3", "received": "3", "loss": "0%", "min": "10.0 ms",
+        "sent": "3", "received": "3", "loss": "0%", "icmp errors": "None", "min": "10.0 ms",
         "avg": "12.5 ms", "max": "15.0 ms", "mdev": "2.041 ms", "reachable": "True",
         "Latency analysis": "OK", "RTT range analysis": "Good",
     }
@@ -202,7 +202,7 @@ def test_display_ping_report_handles_failed_measurements_and_missing_values(caps
     assert "LOCALHOST PING REPORT" in text
     assert "failed" in text
     assert "No packet statistics found" in text
-    assert text.count("None") == 8
+    assert text.count("None") == 9
     assert text.count("Not available") == 2
     assert " ms" not in text
     assert "%" not in text
@@ -555,3 +555,24 @@ def test_display_ping_report_prioritizes_given_error_over_packet_loss_explanatio
     text = capsys.readouterr().out
     assert f"{'reason':<20}: Unable to parse latency statistics" in text
     assert "All test packets were received." not in text
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+def test_display_ping_report_explains_total_loss_with_icmp_errors(capsys):
+    report = PingResult(
+        target="gateway", execution_status=ExecutionStatus.COMPLETED,
+        packets_sent=3, packets_received=0, packet_loss_percent=100.0, reachable=False,
+        icmp_errors=3, packet_loss_status=PacketLossStatus.TOTAL_LOSS,
+    )
+
+    output.display_ping_report(report)
+
+    text = capsys.readouterr().out
+    assert (
+        "No replies were received, but 3 ICMP error messages were reported "
+        "(for example, destination unreachable)." in text
+    )
+    assert "did not respond" not in text
+    assert f"{'icmp errors':<20}: 3" in text

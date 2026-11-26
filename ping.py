@@ -1,20 +1,24 @@
 from command_runner import run_command
 from exceptions import CommandError, CommandTimeoutError, DiagnosticError, ParsingError
 from models import CommandResult, ExecutionStatus, PingResult
-from network import get_gateway
+from network import get_gateway, get_ip_route
 from analysis import analyze_jitter, analyze_packet_loss, ping_latency_analyzation
-from parsers import parse_ping_statistics
+from parsers import parse_ping_statistics, select_default_route
 from validation import validate_host, validate_ipv4_address
 
 
 PING_TIMEOUT = 10
 PING_COUNT = 3
+# Seconds to wait for a reply when no reply has been received (ping -W). The
+# iputils default of 10 s made total loss exceed PING_TIMEOUT and appear as a
+# technical timeout. Sending takes PING_COUNT - 1 seconds before this wait.
+PING_REPLY_WAIT = 2
 
 
 def _run_ping(target: str) -> CommandResult:
     validate_host(target)
     return run_command(
-        ["ping", "-n", "-c", str(PING_COUNT), target],
+        ["ping", "-n", "-c", str(PING_COUNT), "-W", str(PING_REPLY_WAIT), target],
         allowed_codes=(0, 1), timeout=PING_TIMEOUT,
     )
 
@@ -24,9 +28,13 @@ def ping_localhost() -> CommandResult:
 
 
 def ping_gateway() -> CommandResult:
-    gateway = get_gateway()
+    routes = get_ip_route()
+    if select_default_route(routes) is None:
+        raise DiagnosticError("No IPv4 default route found.")
+    gateway = get_gateway(routes)
     if gateway is None:
-        raise DiagnosticError("Could not detect the default gateway.")
+        # For example, a point-to-point link such as `default dev ppp0`.
+        raise DiagnosticError("The IPv4 default route has no gateway address.")
     validate_ipv4_address(gateway)
     return _run_ping(gateway)
 

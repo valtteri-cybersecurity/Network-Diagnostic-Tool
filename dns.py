@@ -5,6 +5,9 @@ from parsers import parse_dig_output, parse_getent_addresses, parse_getent_hosts
 from validation import validate_host
 
 
+DIG_NO_REPLY = 9
+
+
 def dns_run(site: str) -> CommandResult:
     validate_host(site)
     return run_command(
@@ -53,9 +56,19 @@ def dns_query(site: str) -> DnsQueryResult:
 def dns_latency(site: str) -> DnsLatencyResult:
     validate_host(site)
     # -q makes dig treat valid single-label names such as IN or A as the query name.
+    # Exit code 9 means that no DNS server replied. It is a measurement result,
+    # not a failure of dig itself, so the name's resolution remains unknown.
     result = run_command(
-        ["dig", "+time=3", "+tries=1", "+stats", "-q", site]
+        ["dig", "+time=3", "+tries=1", "+stats", "-q", site],
+        allowed_codes=(0, DIG_NO_REPLY),
     )
+
+    if result.return_code == DIG_NO_REPLY:
+        status = ExecutionStatus.FAILED
+        # dig versions differ in whether this message goes to stdout or stderr.
+        if "timed out" in result.stdout + result.stderr:
+            status = ExecutionStatus.TIMEOUT
+        return DnsLatencyResult(hostname=site, execution_status=status, error="No reply from DNS server")
 
     try:
         return parse_dig_output(result.stdout, site)

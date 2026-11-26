@@ -7,25 +7,65 @@ ja päivittää silloin myös niitä kuvaavat testit.
 
 Prioriteetit: P2 = normaalikäytön virheellinen tai puutteellinen raportointi,
 P3 = virheellisen tai poikkeavan syötteen validointipuute. Ei havaittuja P0/P1-ongelmia.
-Avoimet kohdat 1 ja 2 liittyvät oletusreitin valintaan ja yhteystilan tulkintaan, ja ne
-kuuluvat vaiheeseen 10.
+Avoimia numeroituja ongelmia ei tällä hetkellä ole. Jäljellä olevat rajaukset on kuvattu
+tiedoston lopussa.
 
-## 1. P2: Verkkotiedot voivat yhdistyä eri oletusreiteiltä
+## Korjattu (vaihe 10): Verkkotiedot saattoivat tulla eri oletusreiteiltä (entinen kohta 1)
 
-`network.get_ip()` etsii lähdeosoitetta kaikista oletusreiteistä ennen ensimmäisen
-verkkoliitännän osoitekyselyä. Jos ensimmäiseltä reitiltä puuttuu `src` ja toisella
-on se, IP tulee toiselta reitiltä, mutta `get_nic()` ja `get_gateway()` palauttavat
-ensimmäisen reitin tiedot. Järjestelmän tilannekuva voi olla ristiriitainen.
+`parsers.select_default_route()` valitsee yhden oletusreitin ytimen tapaan: pienimmän
+metricin, jolloin puuttuva metric tulkitaan nollaksi ja tasatilanteessa valitaan ensimmäinen.
+Gateway, liitäntä ja lähdeosoite luetaan kaikki tältä reitiltä. Virheellinen metric tuottaa
+`ParsingError`-poikkeuksen.
 
-Testi: `test_get_ip_currently_uses_later_default_source_before_first_interface`.
+Testi `test_get_ip_currently_uses_later_default_source_before_first_interface` on korvattu
+testillä `test_get_ip_reads_address_from_selected_default_route`. Testit
+`test_route_parsers_read_all_values_from_lowest_metric_default_route` ja
+`test_select_default_route_*` epäonnistuivat alkuperäisellä toteutuksella.
 
-## 2. P2: Ulkoisesti yhdistettyä verkkoliitäntää ei tunnisteta
+## Korjattu (vaihe 10): Ulkoisesti yhdistettyä liitäntää ei tunnistettu (entinen kohta 2)
 
-`network.get_network_plugin()` hyväksyy vain täsmälleen tilan `connected`.
-Muun kuin loopback-liitännän `connected (externally)` palauttaa arvon `False`,
-jolloin päävalikko ilmoittaa, ettei yhdistettyä verkkoliitäntää havaittu.
+`get_network_plugin()` hyväksyy nyt tilat `connected` ja `connected (externally)`.
+Testi `test_get_network_plugin_currently_ignores_externally_connected_interface` on korvattu
+testillä `test_get_network_plugin_accepts_externally_connected_interface`.
 
-Testi: `test_get_network_plugin_currently_ignores_externally_connected_interface`.
+## Korjattu (vaihe 10): Täydellinen pakettihävikki aikakatkaistiin
+
+Kun vastauksia ei tullut, iputilsin oletusodotus (`-W`, 10 s) kolmen paketin jälkeen
+ylitti 10 sekunnin `PING_TIMEOUT`-rajan. Täydellinen hävikki raportoitiin siksi teknisenä
+`TIMEOUT`-tilana ilman tilastoja. Ping-komentoon on lisätty `-W 2`, ja aikakatkaisu säilyy
+ennallaan. Testi: `test_run_ping_limits_reply_wait_below_command_timeout`.
+
+## Korjattu (vaihe 10): Pingin ICMP-virheet ja gatewayn puuttumisen syy
+
+`+N errors` tallennetaan nyt kenttään `PingResult.icmp_errors`. CLI ei enää väitä kohteen
+jättäneen vastaamatta, kun reitittimeltä tuli virheilmoitus, kuten *Destination Host
+Unreachable*. Gateway-ping erottaa puuttuvan oletusreitin oletusreitistä, jolla ei ole
+gatewayta. Testit: `test_parse_ping_statistics_reports_icmp_error_count`,
+`test_display_ping_report_explains_total_loss_with_icmp_errors` ja
+`test_ping_gateway_distinguishes_missing_route_from_route_without_gateway`.
+
+## Korjattu (vaihe 10): DNS-tulosten tulkinta
+
+- `getent ahostsv6` käyttää `AI_V4MAPPED`-lippua. Pelkän IPv4:n nimelle raportoitiin siksi
+  IPv6-osoitteita (`::ffff:a.b.c.d`). Testi:
+  `test_ipv_check_does_not_report_ipv4_mapped_addresses_as_ipv6`.
+- digin poistumiskoodi 9 (yksikään DNS-palvelin ei vastannut) nosti poikkeuksen
+  `dig failed: exit code 9`. Nyt tulos on `DnsLatencyResult`, jonka tila on `TIMEOUT` tai
+  `FAILED` ja `resolved=None`. Testi: `test_dns_latency_reports_no_reply_from_server_as_result`.
+
+## Korjattu (vaihe 10): Palvelunimi väärälle protokollalle
+
+Yksiselitteisesti vain UDP:tä tai vain TCP:tä käyttäville palveluille ei enää ehdoteta
+nimeä toisella protokollalla (esim. TCP 68 tai UDP 22). Testi:
+`test_analyze_open_ports_names_single_protocol_services_only_for_their_protocol`.
+
+## Korjattu (vaihe 10): Socket-parseri ohitti tunnistamattomat rivit hiljaa
+
+`ss -H` ei tulosta otsikkoa, joten jokaisen ei-tyhjän rivin täytyy jäsentyä. Ohitettu rivi
+olisi saanut socket-määrän ja palvelulistan näyttämään täydellisiltä. Tunnistamaton rivi
+tuottaa nyt `ParsingError("Unrecognized line in ss output")` -virheen, jonka CLI näyttää
+hallittuna virheenä. Vaiheen 9 testi `test_main_does_not_suggest_services_for_invalid_socket_ports`
+on muutettu muotoon `test_main_reports_invalid_socket_line_instead_of_partial_service_list`.
 
 ## Korjattu (vaihe 9): Porttinumeroiden aluetta ja tyyppiä ei validoitu
 
@@ -106,8 +146,18 @@ Output-moduulille, joka esittää valmiit tiedot muuttamatta niitä. Pakettihäv
 luokittelu kuuluu nyt Analysis-moduuliin, ja selitystekstit jäävät käyttöliittymään.
 Tietomallien tyyppivihjeet eivät validoi mittausarvoja ajon aikana. Vaiheesta 9 lähtien
 komentotulosteet validoidaan `parsers.py`-moduulissa ennen tietomallien muodostamista.
-Itse muodostetut mallit (esim. GUI:sta) eivät kulje parserien kautta. Reititys- ja
-NetworkManager-ongelmat 1–2 säilyvät vaiheen 9 rajauksen mukaisesti.
+Itse muodostetut mallit (esim. GUI:sta) eivät kulje parserien kautta.
+
+Vaiheen 10 rajaukset:
+
+- Multipath-oletusreitin (`nexthop`) seuraavan hypyn arvoja ei jäsennetä, joten liitäntä ja
+  gateway ovat tällöin `None`. `linkdown`- ja `dead`-lippuja ei huomioida, eikä
+  policy routingia arvioida.
+- Palvelunimi on edelleen porttiin perustuva ehdotus. Kuuntelevan osoitteen altistusta
+  (loopback vai kaikki liitännät) ei luokitella.
+- `parse_nmcli_output()` ja `parse_nmcli_states()` ohittavat edelleen virheelliset rivit.
+- Kun yhtään vastausta ei ole saatu, ping odottaa viimeisen paketin jälkeen enintään
+  `PING_REPLY_WAIT` (2 s). Tätä hitaammat vastaukset lasketaan hävityiksi.
 
 Vaiheen 9 rajaukset:
 

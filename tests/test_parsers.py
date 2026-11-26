@@ -80,7 +80,7 @@ def test_parse_ping_statistics_reports_total_loss_as_completed_measurement_witho
     assert result == PingResult(
         target="internet", execution_status=ExecutionStatus.COMPLETED,
         packets_sent=3, packets_received=0, packet_loss_percent=100.0,
-        reachable=False, raw_output=output,
+        reachable=False, raw_output=output, icmp_errors=3,
     )
     # Missing RTT values stay None; they are not zero.
     assert result.min_rtt_ms is None
@@ -609,11 +609,10 @@ def test_parse_ss_output_reads_ipv4_ipv6_and_wildcard_sockets():
     ]
 
 
-def test_parse_ss_output_skips_headers_and_malformed_endpoints():
+def test_parse_ss_output_skips_header_and_empty_lines_and_ignores_process_column():
     lines = [
         "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port",
-        "", "tcp LISTEN 0 128", "tcp LISTEN 0 128 missing-port 0.0.0.0:*",
-        "tcp LISTEN 0 128 0.0.0.0:22 missing-port",
+        "", "   ",
         'tcp LISTEN 0 128 127.0.0.1:8080 0.0.0.0:* users:(("python",pid=1234,fd=3))',
     ]
 
@@ -673,17 +672,11 @@ def test_parse_ss_output_keeps_unknown_protocol_with_valid_endpoints():
     "tcp LISTEN 0 128 [fe80::1%eth0]%eth0:22 [::]:*",
     "tcp LISTEN 0 128 []:22 [::]:*",
 ])
-def test_parse_ss_output_skips_invalid_ports_and_addresses(line):
+def test_parse_ss_output_rejects_invalid_ports_and_addresses(line):
     valid = "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"
 
-    result = parsers.parse_ss_output([line, valid])
-
-    assert result == [
-        ListeningSocket(
-            protocol="tcp", state="LISTEN", local_address="0.0.0.0", local_port="22",
-            peer_address="0.0.0.0", peer_port="*",
-        ),
-    ]
+    with parsing_error("Unrecognized line in ss output"):
+        parsers.parse_ss_output([line, valid])
 
 
 @pytest.mark.parametrize("endpoint, address, port", [
@@ -735,3 +728,87 @@ def test_parse_ss_output_preserves_wildcard_local_port():
         peer_address="*",
         peer_port="*",
     )]
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+def test_route_parsers_read_all_values_from_lowest_metric_default_route():
+    routes = [
+        "default via 198.51.100.1 dev wlan0 proto dhcp src 198.51.100.10 metric 600",
+        "default via 192.0.2.1 dev enp3s0 proto dhcp metric 100",
+    ]
+
+    assert parsers.parse_default_gateway(routes) == "192.0.2.1"
+    assert parsers.parse_default_interface(routes) == "enp3s0"
+    assert parsers.parse_default_source(routes) is None
+
+
+@pytest.mark.parametrize("routes, expected", [
+    (["default via 192.0.2.1 dev enp3s0 metric 100", "default dev ppp0"], "ppp0"),
+    (["default via 192.0.2.1 dev enp3s0", "default via 198.51.100.1 dev wlan0"], "enp3s0"),
+    (["default via 192.0.2.1 dev enp3s0 metric 5", "default via 198.51.100.1 dev wlan0 metric 5"], "enp3s0"),
+    (["default dev", "default via 192.0.2.1 dev enp3s0 metric 100"], "enp3s0"),
+    (["192.0.2.0/24 dev eth9 metric 0", "unreachable default metric 0",
+      "default via 192.0.2.1 dev enp3s0 metric 100"], "enp3s0"),
+])
+def test_select_default_route_uses_lowest_metric_and_first_on_tie(routes, expected):
+    route = parsers.select_default_route(routes)
+
+    assert route[route.index("dev") + 1] == expected
+
+
+@pytest.mark.parametrize("routes", [[], [""], ["192.0.2.0/24 dev enp3s0"], ["default via"],
+                                    ["default via 192.0.2.1 metric"]])
+def test_select_default_route_returns_none_without_complete_default_route(routes):
+    assert parsers.select_default_route(routes) is None
+
+
+@pytest.mark.parametrize("metric", ["-1", "1e3", "0x10", "4294967296", "fast"])
+def test_select_default_route_rejects_invalid_metric(metric):
+    with parsing_error("Invalid default route metric"):
+        parsers.select_default_route([f"default via 192.0.2.1 dev enp3s0 metric {metric}"])
+
+
+def test_parse_getent_addresses_skips_ipv4_mapped_ipv6_addresses():
+    # getent ahostsv6 uses AI_V4MAPPED, so an IPv4-only name returns mapped addresses.
+    output = "::ffff:192.0.2.10 STREAM example.com\n::ffff:192.0.2.10 DGRAM\n2001:db8::10 STREAM\n"
+
+    assert parsers.parse_getent_addresses(output, 6) == ["2001:db8::10"]
+    assert parsers.parse_getent_addresses("::ffff:192.0.2.10 STREAM example.com\n", 6) == []
+
+
+def test_parse_ping_statistics_reports_icmp_error_count():
+    output = (PING_FIXTURES / "total_loss.txt").read_text(encoding="utf-8")
+
+    result = parsers.parse_ping_statistics(output, "gateway")
+
+    assert result.icmp_errors == 3
+    assert result.reachable is False
+    assert result.execution_status is ExecutionStatus.COMPLETED
+
+
+def test_parse_ping_statistics_keeps_unreported_icmp_errors_as_none():
+    result = parsers.parse_ping_statistics(SUMMARY + RTT, "internet")
+
+    assert result.icmp_errors is None
+
+
+@pytest.mark.parametrize("errors", ["+x", "3", "+-1"])
+def test_parse_ping_statistics_rejects_invalid_icmp_error_count(errors):
+    summary = f"3 packets transmitted, 0 received, {errors} errors, 100% packet loss\n"
+
+    with parsing_error("Unable to parse packet statistics"):
+        parsers.parse_ping_statistics(summary, "internet")
+
+
+@pytest.mark.parametrize("line", [
+    "tcp LISTEN 0 128",
+    "tcp LISTEN 0 128 missing-port 0.0.0.0:*",
+    "tcp LISTEN 0 128 0.0.0.0:22 missing-port",
+])
+def test_parse_ss_output_rejects_unrecognized_lines_instead_of_hiding_them(line):
+    valid = "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"
+
+    with parsing_error("Unrecognized line in ss output"):
+        parsers.parse_ss_output([valid, line])

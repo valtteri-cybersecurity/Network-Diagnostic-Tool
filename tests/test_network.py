@@ -182,18 +182,6 @@ def test_get_ip_propagates_address_command_error(monkeypatch):
     assert caught.value is error
 
 
-def test_get_ip_currently_uses_later_default_source_before_first_interface():
-    # Current behavior can mix the second route's IP with the first route's NIC.
-    routes = ["default via 192.0.2.1 dev enp3s0 metric 100",
-              "default via 198.51.100.1 dev wlan0 src 198.51.100.10 metric 600"]
-
-    result = network.get_ip(routes)
-
-    assert result == "198.51.100.10"
-    assert network.get_nic(routes) == "enp3s0"
-    assert network.get_gateway(routes) == "192.0.2.1"
-
-
 def test_get_gateway_reads_routes_when_not_provided(monkeypatch):
     routes = (FIXTURE_DIRECTORY / "ip_route.txt").read_text(encoding="utf-8").splitlines()
     route_command = Mock(return_value=routes)
@@ -245,14 +233,6 @@ def test_get_nic_reads_first_available_default_route_interface(routes, expected)
     result = network.get_nic(routes)
 
     assert result == expected
-
-
-def test_get_network_plugin_currently_ignores_externally_connected_interface(monkeypatch):
-    monkeypatch.setattr(network, "run_command", Mock(return_value=CommandResult([], "enp3s0:connected (externally)\n", "", 0, 0.0)))
-
-    result = network.get_network_plugin()
-
-    assert result is False
 
 
 @pytest.mark.parametrize("function, arguments, fixture_name", [
@@ -335,3 +315,35 @@ def test_get_ip_rejects_invalid_interface_address_output(output, address, subpro
         network.get_ip(["default via 192.0.2.1 dev enp3s0"])
 
     assert str(caught.value) == f"Invalid interface address: Invalid IPv4 address: {address!r}"
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+def test_get_ip_reads_address_from_selected_default_route(monkeypatch):
+    routes = ["default via 192.0.2.1 dev enp3s0 metric 100",
+              "default via 198.51.100.1 dev wlan0 src 198.51.100.10 metric 600"]
+    command = Mock(return_value=CommandResult(
+        [], "2: enp3s0    inet 192.0.2.10/24 brd 192.0.2.255 scope global enp3s0\n", "", 0, 0.0,
+    ))
+    monkeypatch.setattr(network, "run_command", command)
+
+    result = network.get_ip(routes)
+
+    assert result == "192.0.2.10"
+    assert network.get_nic(routes) == "enp3s0"
+    assert network.get_gateway(routes) == "192.0.2.1"
+    command.assert_called_once_with(["ip", "-4", "-o", "addr", "show", "dev", "enp3s0"])
+
+
+@pytest.mark.parametrize("output, expected", [
+    ("enp3s0:connected (externally)\n", True),
+    ("lo:connected (externally)\nenp3s0:disconnected\n", False),
+    ("enp3s0:connecting (getting IP configuration)\n", False),
+])
+def test_get_network_plugin_accepts_externally_connected_interface(output, expected, monkeypatch):
+    monkeypatch.setattr(network, "run_command", Mock(return_value=CommandResult([], output, "", 0, 0.0)))
+
+    result = network.get_network_plugin()
+
+    assert result is expected

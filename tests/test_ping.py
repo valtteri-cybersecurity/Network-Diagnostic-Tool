@@ -26,7 +26,7 @@ def test_run_ping_uses_expected_arguments_and_c_locale(monkeypatch, subprocess_r
     assert result.stdout == output
     assert result.return_code == 0
     subprocess_run.assert_called_once_with(
-        ["ping", "-n", "-c", "3", "example.com"],
+        ["ping", "-n", "-c", "3", "-W", "2", "example.com"],
         capture_output=True, text=True, timeout=10, check=False, shell=False,
         env={**original_environment, "LC_ALL": "C"},
     )
@@ -144,36 +144,27 @@ def test_ping_helpers_use_expected_targets(function, expected_target, monkeypatc
 
 
 def test_ping_gateway_uses_detected_gateway(monkeypatch):
+    routes = ["default via 192.0.2.1 dev enp3s0"]
+    route_command = Mock(return_value=routes)
     gateway = Mock(return_value="192.0.2.1")
     completed = CommandResult(["ping", "192.0.2.1"], "reply", "", 0, 0.1)
     run_ping = Mock(return_value=completed)
+    monkeypatch.setattr(ping, "get_ip_route", route_command)
     monkeypatch.setattr(ping, "get_gateway", gateway)
     monkeypatch.setattr(ping, "_run_ping", run_ping)
 
     result = ping.ping_gateway()
 
     assert result is completed
-    gateway.assert_called_once_with()
+    route_command.assert_called_once_with()
+    gateway.assert_called_once_with(routes)
     run_ping.assert_called_once_with("192.0.2.1")
-
-
-def test_ping_gateway_reports_missing_gateway_without_running_ping(monkeypatch):
-    gateway = Mock(return_value=None)
-    run_ping = Mock(side_effect=AssertionError("No ping expected"))
-    monkeypatch.setattr(ping, "get_gateway", gateway)
-    monkeypatch.setattr(ping, "_run_ping", run_ping)
-
-    with pytest.raises(DiagnosticError, match="Could not detect the default gateway"):
-        ping.ping_gateway()
-
-    gateway.assert_called_once_with()
-    run_ping.assert_not_called()
 
 
 def test_ping_gateway_propagates_gateway_command_error(monkeypatch):
     error = CommandError("ip failed")
     run_ping = Mock(side_effect=AssertionError("No ping expected"))
-    monkeypatch.setattr(ping, "get_gateway", Mock(side_effect=error))
+    monkeypatch.setattr(ping, "get_ip_route", Mock(side_effect=error))
     monkeypatch.setattr(ping, "_run_ping", run_ping)
 
     with pytest.raises(CommandError) as caught:
@@ -345,7 +336,7 @@ def test_run_ping_diagnostic_integrates_command_parsing_and_analysis_silently(
     assert result.reachable is (received > 0)
     assert result.raw_output == raw
     assert result.error is None
-    assert subprocess_run.call_args.args[0] == ["ping", "-n", "-c", "3", "8.8.8.8"]
+    assert subprocess_run.call_args.args[0] == ["ping", "-n", "-c", "3", "-W", "2", "8.8.8.8"]
     subprocess_run.assert_called_once()
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -381,11 +372,11 @@ def test_run_ping_diagnostic_returns_technical_failure_instead_of_stdout_statist
 
 
 def test_ping_target_reports_missing_gateway_as_unknown_reachability(monkeypatch, subprocess_run):
-    monkeypatch.setattr(ping, "get_gateway", Mock(return_value=None))
+    monkeypatch.setattr(ping, "get_ip_route", Mock(return_value=[]))
 
     result = ping.ping_target("gateway")
 
-    assert result == PingResult(target="gateway", error="Could not detect the default gateway.")
+    assert result == PingResult(target="gateway", error="No IPv4 default route found.")
     subprocess_run.assert_not_called()
 
 
@@ -465,6 +456,7 @@ def test_run_ping_rejects_invalid_target_before_running_command(target, subproce
 ])
 def test_ping_gateway_rejects_non_ipv4_gateway_without_running_ping(gateway, monkeypatch):
     run_ping = Mock(side_effect=AssertionError("No ping expected"))
+    monkeypatch.setattr(ping, "get_ip_route", Mock(return_value=["default dev enp3s0"]))
     monkeypatch.setattr(ping, "get_gateway", Mock(return_value=gateway))
     monkeypatch.setattr(ping, "_run_ping", run_ping)
 
@@ -567,3 +559,61 @@ def test_ping_target_accepts_rounded_loss_and_reported_duplicates(raw, received,
     assert result.error is None
     assert result.packets_received == received
     assert result.packet_loss_percent == loss
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+def test_run_ping_limits_reply_wait_below_command_timeout(subprocess_run):
+    # Without -W, iputils waits 10 s for a first reply after the last packet, so
+    # total loss exceeded PING_TIMEOUT and was reported as a technical timeout.
+    output = (FIXTURE_DIRECTORY / "total_loss.txt").read_text(encoding="utf-8")
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 1, output, "")
+
+    ping._run_ping("192.0.2.1")
+
+    arguments = subprocess_run.call_args.args[0]
+    assert arguments == ["ping", "-n", "-c", "3", "-W", "2", "192.0.2.1"]
+    assert ping.PING_COUNT - 1 + ping.PING_REPLY_WAIT < ping.PING_TIMEOUT
+
+
+@pytest.mark.parametrize("routes, message", [
+    ([], "No IPv4 default route found."),
+    (["192.0.2.0/24 dev enp3s0 src 192.0.2.10"], "No IPv4 default route found."),
+    (["default dev ppp0 scope link"], "The IPv4 default route has no gateway address."),
+])
+def test_ping_gateway_distinguishes_missing_route_from_route_without_gateway(routes, message, monkeypatch):
+    run_ping = Mock(side_effect=AssertionError("No ping expected"))
+    monkeypatch.setattr(ping, "get_ip_route", Mock(return_value=routes))
+    monkeypatch.setattr(ping, "_run_ping", run_ping)
+
+    with pytest.raises(DiagnosticError, match="^" + message.replace(".", r"\.") + "$"):
+        ping.ping_gateway()
+
+    run_ping.assert_not_called()
+
+
+def test_ping_gateway_pings_gateway_of_lowest_metric_route(monkeypatch):
+    routes = ["default via 198.51.100.1 dev wlan0 metric 600", "default via 192.0.2.1 dev enp3s0 metric 100"]
+    completed = CommandResult(["ping"], "reply", "", 0, 0.1)
+    run_ping = Mock(return_value=completed)
+    monkeypatch.setattr(ping, "get_ip_route", Mock(return_value=routes))
+    monkeypatch.setattr(ping, "_run_ping", run_ping)
+
+    result = ping.ping_gateway()
+
+    assert result is completed
+    run_ping.assert_called_once_with("192.0.2.1")
+
+
+def test_run_ping_diagnostic_keeps_icmp_errors_of_unreachable_target(subprocess_run, monkeypatch):
+    output = (FIXTURE_DIRECTORY / "total_loss.txt").read_text(encoding="utf-8")
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 1, output, "")
+
+    result = ping.run_ping_diagnostic("internet")
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.packet_loss_status is PacketLossStatus.TOTAL_LOSS
+    assert result.icmp_errors == 3

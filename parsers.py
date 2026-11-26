@@ -16,6 +16,8 @@ from validation import validate_interface_name, validate_ipv4_address
 
 
 MAX_PORT = 65535
+MAX_ROUTE_METRIC = 4294967295
+_ROUTE_KEYWORDS = ("via", "dev", "src", "metric")
 # Ping prints loss rounded (%g in iputils, %.1f on macOS) or truncated to an
 # integer (BusyBox). Any difference below one percentage point is rounding.
 LOSS_TOLERANCE_PERCENT = 1.0
@@ -76,7 +78,8 @@ def parse_ping_statistics(output: str, target: str) -> PingResult:
     sent = None
     received = None
     loss = None
-    # Other fields, such as "+1 duplicates", "+3 errors" and "time", are ignored.
+    errors = None
+    # Other fields, such as "+1 duplicates" and "time", are ignored.
     # Duplicate replies are reported separately and are not part of "received".
     for action in summaries[0].split(","):
         words = action.split()
@@ -84,6 +87,10 @@ def parse_ping_statistics(output: str, target: str) -> PingResult:
             sent = _parse_count(words[0])
         elif "received" in action:
             received = _parse_count(words[0])
+        elif "errors" in action:
+            if not words[0].startswith("+"):
+                raise ParsingError("Unable to parse packet statistics")
+            errors = _parse_count(words[0][1:])
         elif "packet loss" in action:
             if not words[0].endswith("%"):
                 raise ParsingError("Unable to parse packet statistics")
@@ -104,7 +111,7 @@ def parse_ping_statistics(output: str, target: str) -> PingResult:
     report = PingResult(
         target=target, execution_status=ExecutionStatus.COMPLETED,
         packets_sent=sent, packets_received=received, packet_loss_percent=loss,
-        reachable=received > 0, raw_output=output,
+        reachable=received > 0, raw_output=output, icmp_errors=errors,
     )
 
     if not rtt_lines:
@@ -164,7 +171,9 @@ def parse_getent_hosts(output: str) -> Optional[str]:
 def parse_getent_addresses(output: str, version: int) -> list[str]:
     """Return unique addresses of one IP version from `getent ahostsv4/ahostsv6` output.
 
-    Invalid addresses and addresses of the other version are skipped.
+    Invalid addresses and addresses of the other version are skipped. `getent
+    ahostsv6` uses AI_V4MAPPED, so an IPv4-only name returns IPv4-mapped IPv6
+    addresses (::ffff:a.b.c.d). They are IPv4 addresses and are skipped too.
     """
     addresses = []
 
@@ -179,6 +188,8 @@ def parse_getent_addresses(output: str, version: int) -> list[str]:
             continue
 
         if address.version != version:
+            continue
+        if version == 6 and address.ipv4_mapped is not None:
             continue
 
         value = str(address)
@@ -362,21 +373,25 @@ def parse_ss_output(lines: list[str]) -> list[ListeningSocket]:
     """Return sockets from `ss -H -tuln` lines.
 
     Ports must be `*` or 0-65535, and addresses `*`, IPv4 or IPv6 with an
-    optional `%interface` scope. Lines that do not meet this are skipped.
+    optional `%interface` scope. Empty lines and a `Netid` header are skipped.
+    Any other line that does not meet this raises ParsingError, so that a
+    partial socket list is never reported as complete.
     """
     sockets = []
 
     for line in lines:
         parts = line.split()
 
-        if len(parts) < 6 or parts[0] == "Netid":
+        if not parts or parts[0] == "Netid":
             continue
 
         try:
+            if len(parts) < 6:
+                raise ParsingError("Missing socket fields")
             local_address, local_port = _parse_socket_endpoint(parts[4])
             peer_address, peer_port = _parse_socket_endpoint(parts[5])
-        except ParsingError:
-            continue
+        except ParsingError as error:
+            raise ParsingError("Unrecognized line in ss output") from error
 
         sockets.append(ListeningSocket(
             protocol=parts[0], state=parts[1],
@@ -387,26 +402,49 @@ def parse_ss_output(lines: list[str]) -> list[ListeningSocket]:
     return sockets
 
 
-def _default_route_value(route_lines: list[str], keyword: str) -> Optional[str]:
-    # Each value is taken from the first default route that contains the keyword.
-    # Choosing a single default route belongs to a later phase (KNOWN_ISSUES 1).
+def select_default_route(route_lines: list[str]) -> Optional[list[str]]:
+    """Return the fields of the IPv4 default route the kernel prefers, or None.
+
+    The kernel uses the default route with the lowest metric. A route without a
+    metric has metric 0, and the first listed route wins a tie. A line that ends
+    with a keyword without its value is incomplete and skipped. Typed routes such
+    as `unreachable default` do not start with `default` and are not candidates.
+    Gateway, interface and source address are all read from this one route.
+    """
+    selected = None
+    selected_metric = 0
+
     for line in route_lines:
         parts = line.split()
 
-        if not parts or parts[0] != "default":
+        if not parts or parts[0] != "default" or parts[-1] in _ROUTE_KEYWORDS:
             continue
 
-        if keyword in parts:
-            index = parts.index(keyword)
+        metric = 0
+        if "metric" in parts:
+            text = parts[parts.index("metric") + 1]
+            if not _COUNT.fullmatch(text) or int(text) > MAX_ROUTE_METRIC:
+                raise ParsingError("Invalid default route metric")
+            metric = int(text)
 
-            if index + 1 < len(parts):
-                return parts[index + 1]
+        if selected is None or metric < selected_metric:
+            selected = parts
+            selected_metric = metric
 
-    return None
+    return selected
+
+
+def _default_route_value(route_lines: list[str], keyword: str) -> Optional[str]:
+    route = select_default_route(route_lines)
+
+    if route is None or keyword not in route:
+        return None
+
+    return route[route.index(keyword) + 1]
 
 
 def parse_default_gateway(route_lines: list[str]) -> Optional[str]:
-    """Return the validated IPv4 gateway (`via`) of a default route, or None."""
+    """Return the validated IPv4 gateway (`via`) of the selected default route, or None."""
     gateway = _default_route_value(route_lines, "via")
     if gateway is None:
         return None
@@ -414,7 +452,7 @@ def parse_default_gateway(route_lines: list[str]) -> Optional[str]:
 
 
 def parse_default_interface(route_lines: list[str]) -> Optional[str]:
-    """Return the validated interface name (`dev`) of a default route, or None."""
+    """Return the validated interface name (`dev`) of the selected default route, or None."""
     interface = _default_route_value(route_lines, "dev")
     if interface is None:
         return None
@@ -422,7 +460,7 @@ def parse_default_interface(route_lines: list[str]) -> Optional[str]:
 
 
 def parse_default_source(route_lines: list[str]) -> Optional[str]:
-    """Return the validated IPv4 source address (`src`) of a default route, or None."""
+    """Return the validated IPv4 source address (`src`) of the selected default route, or None."""
     source = _default_route_value(route_lines, "src")
     if source is None:
         return None

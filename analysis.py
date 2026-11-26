@@ -8,6 +8,15 @@ from exceptions import ParsingError
 from parsers import MAX_PORT, parse_port
 
 
+# Services in get_known_ports() that use only one transport protocol. The same
+# port number on the other protocol is not that service.
+UDP_ONLY_SERVICE_PORTS = frozenset({67, 68, 69, 123, 138, 520, 546, 547, 784, 8853, 51820})
+TCP_ONLY_SERVICE_PORTS = frozenset({
+    20, 21, 22, 23, 25, 110, 139, 143, 179, 445, 465, 587, 993, 995,
+    1433, 1521, 3306, 5432, 6379, 9200, 9300, 27017, 33060,
+})
+
+
 def _check_latency(value: float) -> None:
     if not math.isfinite(value) or value < 0:
         raise ValueError("latency must be a finite non-negative number")
@@ -47,6 +56,11 @@ def analyze_open_ports(open_port_data: list[ListeningSocket]) -> list[ServiceInf
             continue
 
         service_name = known_ports.get(port, "UNKNOWN")
+        protocol = (row.protocol or "").upper()
+        if protocol == "TCP" and port in UDP_ONLY_SERVICE_PORTS:
+            service_name = "UNKNOWN"
+        elif protocol == "UDP" and port in TCP_ONLY_SERVICE_PORTS:
+            service_name = "UNKNOWN"
 
         services.append(ServiceInfo(
             protocol=row.protocol if row.protocol is not None else "UNKNOWN",

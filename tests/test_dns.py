@@ -189,7 +189,7 @@ def test_dns_latency_parses_response_and_uses_bounded_dig_query(
         execution_status=ExecutionStatus.COMPLETED,
         answer_count=2 if status == "NOERROR" else 0,
     )
-    command.assert_called_once_with(["dig", "+time=3", "+tries=1", "+stats", "-q", site])
+    command.assert_called_once_with(["dig", "+time=3", "+tries=1", "+stats", "-q", site], allowed_codes=(0, 9))
 
 
 @pytest.mark.parametrize("old_text, new_text, status, latency, answers, resolved", [
@@ -458,3 +458,58 @@ def test_dns_latency_reports_conflicting_status_values_as_failed_result(monkeypa
         hostname="example.com", execution_status=ExecutionStatus.FAILED,
         error="Conflicting DNS response status values",
     )
+
+
+# --- Phase 10 regressions -----------------------------------------------------
+
+
+@pytest.mark.parametrize("stdout, status", [
+    (";; communications error to 127.0.0.53#53: timed out\n;; no servers could be reached\n",
+     ExecutionStatus.TIMEOUT),
+    (";; communications error to 127.0.0.53#53: connection refused\n", ExecutionStatus.FAILED),
+])
+def test_dns_latency_reports_no_reply_from_server_as_result(stdout, status, subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], 9, stdout, "")
+
+    result = dns.dns_latency("example.com")
+
+    assert result == DnsLatencyResult(
+        hostname="example.com", execution_status=status, error="No reply from DNS server",
+    )
+    assert result.resolved is None
+    assert result.dns_latency_ms is None
+
+
+@pytest.mark.parametrize("returncode", [1, 10])
+def test_dns_latency_still_raises_for_dig_usage_or_internal_error(returncode, subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess([], returncode, "", "dig: error")
+
+    with pytest.raises(CommandError, match="dig failed: dig: error"):
+        dns.dns_latency("example.com")
+
+
+def test_ipv_check_does_not_report_ipv4_mapped_addresses_as_ipv6(subprocess_run):
+    ipv4 = "192.0.2.10 STREAM example.com\n192.0.2.10 DGRAM\n"
+    ipv6 = "::ffff:192.0.2.10 STREAM example.com\n::ffff:192.0.2.10 DGRAM\n"
+    subprocess_run.side_effect = [
+        subprocess.CompletedProcess([], 0, ipv4, ""), subprocess.CompletedProcess([], 0, ipv6, ""),
+    ]
+
+    result = dns.ipv_check("example.com")
+
+    assert result.ipv4_addresses == ["192.0.2.10"]
+    assert result.ipv6_addresses == []
+
+
+def test_dns_latency_detects_no_reply_timeout_reported_on_stderr(subprocess_run):
+    subprocess_run.side_effect = None
+    subprocess_run.return_value = subprocess.CompletedProcess(
+        [], 9, "", ";; connection timed out; no servers could be reached\n",
+    )
+
+    result = dns.dns_latency("example.com")
+
+    assert result.execution_status is ExecutionStatus.TIMEOUT
+    assert result.error == "No reply from DNS server"

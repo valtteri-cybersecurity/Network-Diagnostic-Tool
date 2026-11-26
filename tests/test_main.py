@@ -452,11 +452,12 @@ def test_main_integrates_ping_measurements_analysis_and_report(
     assert fields["RTT range analysis"] == variation
     if received == "0":
         assert fields["reachable"] == "False"
-        assert "No test packets were received" in fields["reason"]
+        # The fixture reports "+3 errors" (destination unreachable).
+        assert "No replies were received, but 3 ICMP error messages" in fields["reason"]
     else:
         assert fields["reachable"] == "True"
         assert "packets were" in fields["reason"]
-    assert subprocess_run.call_args.args[0] == ["ping", "-n", "-c", "3", "8.8.8.8"]
+    assert subprocess_run.call_args.args[0] == ["ping", "-n", "-c", "3", "-W", "2", "8.8.8.8"]
     subprocess_run.assert_called_once()
     assert user_input.call_count == 4
 
@@ -578,8 +579,11 @@ def test_main_reports_invalid_route_interface_without_address_command(user_input
     ]
 
 
-def test_main_does_not_suggest_services_for_invalid_socket_ports(user_input, subprocess_run, monkeypatch):
-    user_input.side_effect = ["3", "2", "3", "5"]
+def test_main_reports_invalid_socket_line_instead_of_partial_service_list(
+    user_input, subprocess_run, monkeypatch, capsys,
+):
+    # The error returns the CLI to the main menu, as for other DiagnosticErrors.
+    user_input.side_effect = ["3", "2", "5"]
     raw = (
         "tcp LISTEN 0 128 0.0.0.0:99999 0.0.0.0:*\n"
         "tcp LISTEN 0 128 not-an-address:22 0.0.0.0:*\n"
@@ -592,9 +596,9 @@ def test_main_does_not_suggest_services_for_invalid_socket_ports(user_input, sub
 
     main.main()
 
-    display.assert_called_once_with([
-        ServiceInfo(protocol="TCP", local_address="0.0.0.0", port=22, service_name="SSH"),
-    ])
+    # Skipping the invalid lines would present port 22 as the complete list.
+    display.assert_not_called()
+    assert "Error: Unrecognized line in ss output" in capsys.readouterr().out
 
 
 def test_main_reports_invalid_route_source_address_as_controlled_error(user_input, subprocess_run, capsys):
